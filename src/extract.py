@@ -3,6 +3,8 @@ from pathlib import Path
 import argparse
 import csv
 from collections import Counter
+import gcsfs
+
 
 def detect_delimiter(sample: str) -> str:
     """
@@ -20,7 +22,7 @@ def detect_delimiter(sample: str) -> str:
     lines = [l for l in sample.splitlines() if l.strip()]
     if not lines:
         return ","
-
+ 
     scores = {}
     for sep in candidates:
         counts = [line.count(sep) for line in lines]
@@ -36,7 +38,25 @@ def detect_delimiter(sample: str) -> str:
     return ","  # last resort
 
 
-def read_sample(path: Path, n_bytes: int = 8192) -> tuple[str, str]:
+
+def is_gcs_path(path: str) -> bool:
+    return path.startswith("gs://") or path.startswith("gsc://")
+
+
+def read_sample_gcs(path: str, n_bytes: int = 8192) -> tuple[str, str]:
+
+    fs = gcsfs.GCSFileSystem()
+    for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
+        try:
+            with fs.open(path, "rb") as f:
+                raw = f.read(n_bytes)
+                return raw.decode(encoding=enc), enc
+        except UnicodeDecodeError:
+            continue
+    raise ValueError(f"Encoding detection failed: {path}")
+
+
+def read_sample_local(path: Path, n_bytes: int = 8192) -> tuple[str, str]:
     """Try common encodings and return (sample_text, encoding)."""
     for enc in ["utf-8-sig", "utf-8", "latin-1", "cp1252"]:
         try:
@@ -47,45 +67,71 @@ def read_sample(path: Path, n_bytes: int = 8192) -> tuple[str, str]:
     raise ValueError(f"Encoding detection failed: {path}")
 
 
+
 def load_data(path: str) -> pd.DataFrame:
-    """Data loader with delimiter detection and validation."""
-    path = Path(path)
+    if is_gcs_path(path):
+        return _load_gcs(path)
+    return _load_local(Path(path))
 
-    if not path.exists():
-        raise FileNotFoundError(f"{path} does not exist")
 
-    if path.suffix == ".xlsx":
-        return pd.read_excel(path)
+def _load_gcs(path: str) -> pd.DataFrame:
 
-    if path.suffix in (".txt", ".csv"):
-        sample, encoding = read_sample(path)
+    suffix = path.rsplit(".", 1)[-1].lower()
+    if suffix == "xlsx":
+        fs = gcsfs.GCSFileSystem()
+        with fs.open(path, "rb") as f:
+            return pd.read_excel(f)
+
+    if suffix in ("txt", "csv"):
+        sample, encoding = read_sample_gcs(path)
         sep = detect_delimiter(sample)
         print(f"Detected delimiter: {repr(sep)}, encoding: {encoding}")
-        df = pd.read_csv(
+        fs = gcsfs.GCSFileSystem()
+        with fs.open(path, "rb") as f:
+            return pd.read_csv(
+                f,
+                sep=sep,
+                decimal=",",
+                encoding=encoding,
+                low_memory=False,
+                dtype=str,
+                on_bad_lines="warn",
+            )
+
+    raise ValueError(f"Unsupported file type: .{suffix}")
+
+
+
+def _load_local(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"{path} does not exist")
+    if path.suffix == ".xlsx":
+        return pd.read_excel(path)
+    if path.suffix in (".txt", ".csv"):
+        sample, encoding = read_sample_local(path)
+        sep = detect_delimiter(sample)
+        print(f"Detected delimiter: {repr(sep)}, encoding: {encoding}")
+        return pd.read_csv(
             path,
             sep=sep,
             decimal=",",
             encoding=encoding,
             low_memory=False,
             dtype=str,
-            on_bad_lines="warn", 
+            on_bad_lines="warn",
         )
-        return df
-
     raise ValueError(f"Unsupported file type: {path.suffix}")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Load and validate a dataset")
-    parser.add_argument("file", type=str, help="Path to the file to load")
+    parser = argparse.ArgumentParser(description="Load a dataset (local or GCS)")
+    parser.add_argument("file", type=str, help="Local path or gs://bucket/file.csv")
     args = parser.parse_args()
 
     try:
         df = load_data(args.file)
-        print(f"Data loaded successfully from {args.file}")
-        print(f"Loaded {len(df)} rows and {len(df.columns)} columns.")
-        print()
-        print("Sample data:")
+        print(f"\nLoaded {len(df)} rows and {len(df.columns)} columns.")
+        print("\nSample data:")
         print(df.sample(min(5, len(df))))
     except Exception as e:
         print(f"Error loading data: {e}")
