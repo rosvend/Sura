@@ -205,3 +205,9 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Terraform files 
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
