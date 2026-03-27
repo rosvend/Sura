@@ -4,15 +4,52 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-Sura is a healthcare provider clustering system for ARL SURA (a Colombian workers' compensation insurer). It groups ~800 healthcare service provider firms into strategic clusters to optimize task assignment for ~2.1M client companies. Documentation and comments are in Spanish.
+This project is a healthcare provider clustering system for ARL SURA (a Colombian workers' compensation insurer). It groups ~800 healthcare service provider firms into strategic clusters to optimize task assignment for ~2.1M client companies. Documentation and comments are in Spanish.
+
+## Build & Run
+
+Package manager is **uv** (Python 3.12). No test framework is configured yet.
+
+```bash
+uv sync                  # install dependencies
+
+# Silver layer data loading (primary workflow for teammates)
+uv run python -c "from src.silver.extract import load_ordenado; print(load_ordenado().collect().head())"
+
+# Raw file ingestion (if converting new source files)
+uv run python src/ingestion/extract.py <file>   # local path or gs://...
+
+# One-off scripts (already ran, kept for reproducibility)
+uv run python scripts/load_to_parquet.py        # batch convert raw files to parquet on GCS
+uv run python scripts/benchmark.py              # benchmark loading approaches
+```
 
 ## Architecture
 
 Medallion (Bronze → Silver → Gold) data pipeline using **Polars** as the primary DataFrame library.
 
+- **`src/config.py`** — centralized GCS bucket paths and dataset constants
+- **`src/ingestion/`** — Bronze layer: raw file loading with auto-detection (encoding, delimiter). `load_data(path)` is the unified entry point.
+- **`src/silver/`** — Silver layer: named loader functions returning `pl.LazyFrame`. This is where teammates start: `from src.silver.extract import load_ordenado`
+- **`scripts/`** — one-off utilities (parquet conversion, benchmarks), not part of the pipeline
 - **`docs/`** — project documentation (data dictionary, diagnosis, challenge spec, brand colors)
-- **`notebooks/`** — EDA Jupyter notebook
+- **`notebooks/`** — EDA Jupyter notebooks
 
+### Data Access Pattern
+
+All data is pre-converted to Parquet on GCS. Use Polars lazy scan:
+
+```python
+from src.silver.extract import load_ordenado
+df = load_ordenado().select(["col1", "col2"]).filter(pl.col("col1") == "x").collect()
+```
+
+## Key Conventions
+
+- GCS bucket: `gs://sura-clustering-raw/`
+- Integration keys across datasets: `DNI_PRESTADOR` (provider), `NMCONSECUTIVO_ORDEN` (order), `Empresa_Id` (company), `CDTAREA` (task)
+- Encoding fallback order in raw loader: utf-8-sig → utf-8 → latin-1 → cp1252
+- All raw columns are ingested as strings (`infer_schema_length=0`); type casting happens in silver layer
 
 ## Documentation & Analysis
 
