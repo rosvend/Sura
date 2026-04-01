@@ -65,13 +65,37 @@ def load_data(path: str) -> pl.DataFrame:
     return _load_local(Path(path))
 
 
+def _read_all_sheets(source: "io.BytesIO | Path") -> pl.DataFrame:
+    """Read all sheets from an Excel file, tag each row with _RED_ORIGEN and concatenate."""
+    import openpyxl
+
+    # For BytesIO we need the raw bytes so we can re-read the source multiple times
+    if isinstance(source, io.BytesIO):
+        raw = source.getvalue()
+        get_source = lambda: io.BytesIO(raw)
+    else:
+        get_source = lambda: source
+
+    wb = openpyxl.load_workbook(get_source(), read_only=True)
+    sheet_names = wb.sheetnames
+    wb.close()
+
+    frames = []
+    for sheet in sheet_names:
+        df = pl.read_excel(get_source(), sheet_name=sheet, infer_schema_length=0)
+        df = df.with_columns(pl.lit(sheet).alias("_RED_ORIGEN"))
+        frames.append(df)
+    return pl.concat(frames, how="diagonal_relaxed")
+
+
 def _load_gcs(path: str) -> pl.DataFrame:
     suffix = path.rsplit(".", 1)[-1].lower()
     fs = gcsfs.GCSFileSystem()
 
     if suffix == "xlsx":
         with fs.open(path, "rb") as f:
-            return pl.read_excel(io.BytesIO(f.read()))
+            raw = io.BytesIO(f.read())
+        return _read_all_sheets(raw)
 
     if suffix in ("txt", "csv"):
         sample, encoding = read_sample_gcs(path)
@@ -95,7 +119,7 @@ def _load_local(path: Path) -> pl.DataFrame:
         raise FileNotFoundError(f"{path} does not exist")
 
     if path.suffix == ".xlsx":
-        return pl.read_excel(path)
+        return _read_all_sheets(path)
 
     if path.suffix in (".txt", ".csv"):
         sample, encoding = read_sample_local(path)
