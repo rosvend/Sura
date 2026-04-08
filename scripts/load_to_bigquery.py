@@ -6,6 +6,8 @@ Usage:
 Tables loaded:
     - sura_clustering_cleaned.tareas_prestador
     - sura_clustering_cleaned.detalle_empresa
+    - sura_clustering_cleaned.ordenado
+    - sura_clustering_cleaned.tareas_programadas
 
 Existing tables are fully replaced (WRITE_TRUNCATE).
 """
@@ -14,7 +16,10 @@ import io
 import polars as pl
 from google.cloud import bigquery
 
-from src.silver.extract import load_empresas, load_tareas_prestador
+from src.silver.extract import (
+    load_empresas, load_tareas_prestador,
+    load_ordenado, load_tareas_programadas,
+)
 
 PROJECT   = "proyecto-sura-clustering-2026"
 DATASET   = "sura_clustering_cleaned"
@@ -46,6 +51,12 @@ def main():
 
     print("Processing detalle_empresa...")
     load_table("detalle_empresa", load_empresas().collect())
+
+    print("Processing ordenado...")
+    load_table("ordenado", load_ordenado().collect())
+
+    print("Processing tareas_programadas...")
+    load_table("tareas_programadas", load_tareas_programadas().collect())
 
     print("=== Load complete ===")
 

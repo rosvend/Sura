@@ -2,6 +2,7 @@
 
 Usage:
     from src.silver.extract import load_ordenado, load_empresas
+    from src.silver.extract import load_tareas_programadas, load_tareas_prestador
 
 Each function returns a Polars LazyFrame. Chain .select(), .filter(), then .collect().
 """
@@ -9,6 +10,8 @@ Each function returns a Polars LazyFrame. Chain .select(), .filter(), then .coll
 import polars as pl
 
 from src.config import PARQUET_FILES
+
+# ── Tareas_Prestador: grupos de columnas ─────────────────────────────────
 
 _DATE_COLS_STANDARD = [
     "FEALTA_PRESTADOR",       # Registro del prestador
@@ -29,6 +32,29 @@ _BOOL_COLS = ["SNCONTROLAR_HORAS_MES", "SNVALIDADO"]
 
 # Columnas numéricas (puntajes y capacidad)
 _NUMERIC_COLS = ["CAPACIDAD", "PTCALIFICACION", "PTVALOR_TAREA"]
+
+# ── Tareas programadas: grupos de columnas ───────────────────────────────
+
+# Fechas formato ISO 8601 'YYYY-MM-DDTHH:MM:SS.mmmZ'
+_TP_DATE_COLS_ISO = [
+    "FEENTREGA_SERVICIO_INI", "FEENTREGA_SERVICIO_FIN",
+    "FEPROGRAMACION", "FEINGRESO_CUMPLIMIENTO",
+    "FECANCELACION", "FEENVIO_INFORME",
+    "FEAPROBACION_INFORME", "FERECHAZO_INFORME",
+]
+
+# Fechas formato simple 'YYYY-MM-DD'
+_TP_DATE_COLS_SIMPLE = ["FECREACION_OC", "FECHA_CARGA"]
+
+_TP_NUMERIC_COLS = [
+    "NMCANTIDAD_PEDIDA", "NMCANTIDAD_PROGRAMADA", "DURACION",
+    "CANTIDAD_PROGRAMADA_CITA", "NMCANTIDAD_EJECUTADA", "NMASISTENTES",
+]
+
+_TP_BOOL_COLS = [
+    "SNREQUIERE_INFORME", "SNCANCELA_EMPRESA",
+    "SNAPROBADO_AUTOMATICO", "SNPARCIAL",
+]
 
 # ── Ordenado: grupos de columnas ─────────────────────────────────────────
 
@@ -57,13 +83,6 @@ _ORD_QTY_COLS = [
     "Pct_Cu_Cronograma",
 ]
 
-_ORD_INT_COLS = [
-    "Numero_Consecutivo_Orden",
-    "Numero_Consecutivo_Plan",
-    "Numero_Version",
-    "Numero_Actividad",
-]
-
 _ORD_BOOL_COLS = [
     "Ind_Requiere_Informe",
     "Ind_Informe_Obligatorio",
@@ -82,7 +101,6 @@ def load_ordenado() -> pl.LazyFrame:
     - Filas malformadas eliminadas (246 registros con PK nulo por error de parseo)
     - Fechas (d/MM/yyyy) a Date
     - Costos y cantidades (separador decimal coma) a Float64
-    - Numero_Consecutivo_Orden, Numero_Version, etc. a Int64
     - Indicadores S/N a Boolean
     - Duplicados exactos eliminados
     - FLAG_PERFIL_DESCONOCIDO: True si el perfil del prestador es desconocido
@@ -143,21 +161,16 @@ def _clean_ordenado(df: pl.LazyFrame) -> pl.LazyFrame:
             .alias(col)
             for col in _ORD_COST_COLS + _ORD_QTY_COLS
         ])
-        # 6. Columnas enteras a Int64
-        .with_columns([
-            pl.col(col).cast(pl.Int64, strict=False)
-            for col in _ORD_INT_COLS
-        ])
-        # 7. Indicadores S/N a Boolean
+        # 6. Indicadores S/N a Boolean
         .with_columns([
             (pl.col(col) == "S").alias(col)
             for col in _ORD_BOOL_COLS
         ])
-        # 8. Eliminar duplicados exactos (~48 filas).
+        # 7. Eliminar duplicados exactos (~48 filas).
         #    Se aplica después de normalizar strings para detectar duplicados
         #    que solo diferían en espacios.
         .unique(maintain_order=False)
-        # 9. Flag para órdenes donde el perfil del prestador es desconocido.
+        # 8. Flag para órdenes donde el perfil del prestador es desconocido.
         #    23,602 filas (3.9%) tenían '?' en Perfil_Prestador, Tipo_Asesor
         #    y Codigo_Perfil_Prestador (ahora null tras paso 2).
         .with_columns(
@@ -222,8 +235,83 @@ def _clean_empresas(df: pl.LazyFrame) -> pl.LazyFrame:
 
 
 def load_tareas_programadas() -> pl.LazyFrame:
-    """Scheduled tasks & cancellations (1.5M rows, 62 cols)."""
-    return pl.scan_parquet(PARQUET_FILES["tareas_programadas"])
+    """Tareas programadas y canceladas 2025 (Silver, limpio).
+
+    Transformaciones aplicadas:
+    - Strings: espacios extra eliminados, cadenas vacías a null y saltos de línea en
+      MOTIVO_CANCELACION reemplazados por espacio
+    - Fechas ISO ('YYYY-MM-DDTHH:MM:SS.mmmZ') a Date (8 cols): FEENTREGA_SERVICIO_INI/FIN,
+      FEPROGRAMACION, FEINGRESO_CUMPLIMIENTO, FECANCELACION, FEENVIO_INFORME,
+      FEAPROBACION_INFORME, FERECHAZO_INFORME
+    - Fechas simples ('YYYY-MM-DD') a Date (2 cols): FECREACION_OC, FECHA_CARGA
+    - 6 columnas numéricas a Float64
+    - 4 indicadores S/N a Boolean ('S' → True, 'N' → False, null → null)
+    - DSESTADO_INFORME: abreviaturas normalizadas (AP → APROBADO, PA → PRE-APROBADO, RE → RECHAZADO)
+    - FLAG_CANTIDAD_EJECUTADA_NEGATIVA: 4 filas con NMCANTIDAD_EJECUTADA < 0
+    - Sin eliminación de filas. Los nulos son esperados por negocio (citas no canceladas,
+      sin informe, etc.) y los 73,818 duplicados por llave son citas distintas válidas
+    """
+    return _clean_tareas_programadas(
+        pl.scan_parquet(PARQUET_FILES["tareas_programadas"])
+    )
+
+
+def _clean_tareas_programadas(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Limpieza Silver para Tareas_Programadas_canceladas_2025."""
+
+    return (
+        df
+        # 1. Normalizar strings: quitar espacios extremos y convertir vacíos a null
+        .with_columns(
+            pl.when(pl.col(pl.String).str.strip_chars() == "")
+            .then(None)
+            .otherwise(pl.col(pl.String).str.strip_chars())
+            .name.keep()
+        )
+        # 2. Limpiar saltos de línea en MOTIVO_CANCELACION (campo de texto libre
+        #    con 70,217 valores únicos y formato: '\n2025/09/12 - CANCELADA: \n...')
+        .with_columns(
+            pl.col("MOTIVO_CANCELACION")
+            .str.replace_all(r"\n", " ")
+            .str.strip_chars()
+            .alias("MOTIVO_CANCELACION")
+        )
+        # 3. Normalizar abreviaturas en DSESTADO_INFORME:
+        #    'AP' (125,427) → 'APROBADO', 'PA' (14,438) → 'PRE-APROBADO', 'RE' (34) → 'RECHAZADO'
+        .with_columns(
+            pl.col("DSESTADO_INFORME")
+            .replace({"AP": "APROBADO", "PA": "PRE-APROBADO", "RE": "RECHAZADO"})
+            .alias("DSESTADO_INFORME")
+        )
+        # 4. Fechas ISO a Date (se extrae solo la parte de fecha para evitar
+        #    conflictos con zona horaria Z)
+        .with_columns([
+            pl.col(col).str.slice(0, 10)
+            .str.to_date(format="%Y-%m-%d", strict=False)
+            .alias(col)
+            for col in _TP_DATE_COLS_ISO
+        ])
+        # 5. Fechas simples a Date
+        .with_columns([
+            pl.col(col).str.to_date(format="%Y-%m-%d", strict=False).alias(col)
+            for col in _TP_DATE_COLS_SIMPLE
+        ])
+        # 6. Columnas numéricas a Float64
+        .with_columns([
+            pl.col(col).cast(pl.Float64, strict=False)
+            for col in _TP_NUMERIC_COLS
+        ])
+        # 7. Indicadores S/N a Boolean ('S' → True, 'N' → False, null → null)
+        .with_columns([
+            (pl.col(col) == "S").alias(col)
+            for col in _TP_BOOL_COLS
+        ])
+        # 8. Flag para las 4 filas con cantidad negativa (anomalía de captura, no son esperadas por negocio)
+        #    .fill_null(False): NMCANTIDAD_EJECUTADA null significa no ejecutada, no negativa
+        .with_columns(
+            (pl.col("NMCANTIDAD_EJECUTADA") < 0).fill_null(False).alias("FLAG_CANTIDAD_EJECUTADA_NEGATIVA")
+        )
+    )
 
 
 def load_tareas_prestador() -> pl.LazyFrame:
@@ -276,7 +364,7 @@ def _clean_tareas_prestador(df: pl.LazyFrame) -> pl.LazyFrame:
             pl.col(col).cast(pl.Float64, strict=False)
             for col in _NUMERIC_COLS
         ])
-        # 5. Columnas booleanas: 'S' → True, cualquier otro valor → False
+        # 5. Columnas booleanas: 'S' → True, 'N' → False, null → null
         .with_columns([
             (pl.col(col) == "S").alias(col)
             for col in _BOOL_COLS
