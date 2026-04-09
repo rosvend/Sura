@@ -16,13 +16,14 @@ import io
 import polars as pl
 from google.cloud import bigquery
 
+from src.config import BQ_PROJECT, BQ_DATASET_SILVER
 from src.silver.extract import (
     load_empresas, load_tareas_prestador,
     load_ordenado, load_tareas_programadas,
 )
 
-PROJECT   = "proyecto-sura-clustering-2026"
-DATASET   = "sura_clustering_cleaned"
+PROJECT   = BQ_PROJECT
+DATASET   = BQ_DATASET_SILVER
 CLIENT    = bigquery.Client(project=PROJECT)
 
 JOB_CONFIG = bigquery.LoadJobConfig(

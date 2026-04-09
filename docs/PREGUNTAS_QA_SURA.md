@@ -69,3 +69,56 @@ Este documento reúne preguntas de entendimiento de negocio para la sesión de Q
 
 **Q16. ¿Existen restricciones de negocio, contractuales o regulatorias que el modelo TIENE que respetar obligatoriamente? Por ejemplo: contratos exclusivos entre ciertos prestadores y ciertas empresas, SLAs mínimos de tiempo de respuesta, o reglas políticas/geográficas sobre qué firma atiende qué región.**
 *Estas son las restricciones duras — violarlas invalida el modelo por completo sin importar qué tan buenos sean los clusters.*
+
+---
+
+## 6. Validación de supuestos técnicos — Capa Gold (Fase 1: limpieza de datos)
+
+> Estas preguntas validan supuestos asumidos al construir las features del modelo. Una respuesta incorrecta en cualquiera de ellas implica recalcular una o más features antes de entrenar.
+
+**Q17. La jerarquía de perfiles `DSTIPO_PERFIL` en el catálogo se codificó con el orden: BÁSICO → TECNÓLOGO → INTERMEDIO → PROFESIONAL → AVANZADO → EXPERTO → ESPECIALISTA (de menor a mayor seniority). ¿Esa progresión refleja fielmente los niveles de competencia que maneja SURA internamente?**
+*Si el orden es incorrecto, la feature `tipo_perfil_ord` introduce un sesgo sistemático en el clustering. Es la pregunta de validación técnica más importante del encuentro.*
+
+**Q18. El campo `CAPACIDAD` del catálogo tiene valores entre 0 y 240, interpretados como horas de disponibilidad. ¿Corresponden a un período mensual, trimestral o anual?**
+*La feature `utilizacion_capacidad = duracion_ejecutada / capacidad_declarada` solo es válida si ambas magnitudes están en la misma unidad temporal. Si la capacidad es mensual pero la duración ejecutada es anual (2025 completo), el ratio está inflado en un factor de 12.*
+
+**Q19. En el dataset de tareas programadas, ¿`SNCANCELA_EMPRESA = True` significa que la empresa cliente fue responsable de la cancelación?**
+*Si el campo significa lo contrario (True = el prestador o el sistema canceló), las features `tasa_cancela_empresa` y `tasa_cancela_prestador` estarían completamente invertidas. Es el supuesto de mayor riesgo del modelo: los prestadores confiables aparecerían como problemáticos.*
+
+**Q20. Los estados `PARCIALMENTE EJECUTADO` y `PARCIALMENTE COMPLETADO` se contabilizaron como citas exitosas al calcular `tasa_ejecucion`. Desde el punto de vista operativo y de facturación, ¿una ejecución parcial cuenta como servicio entregado o se trata como una cancelación?**
+*Si las ejecuciones parciales son fallos, `tasa_ejecucion` está sobreestimada para prestadores con alto porcentaje de parciales y `tasa_cancelacion` está subestimada. Requiere reclasificar esos estados y regenerar Gold.*
+
+**Q21. El campo `FECHA_INGRESO` del catálogo se usó para calcular la antigüedad de cada prestador en la red (`antiguedad_dias`). ¿Esa fecha registra cuándo el prestador ingresó realmente a la red de SURA, o puede ser una fecha de última actualización del registro en el sistema?**
+*Si es fecha de actualización del sistema, `antiguedad_dias` es ruido en lugar de señal y debe eliminarse de las features del modelo.*
+
+**Q22. 1.352 prestadores del catálogo (20.7%) no ejecutaron ninguna visita de campo en 2025 y fueron excluidos del input de clustering. ¿Son prestadores definitivamente inactivos (dados de baja, suspendidos), o son prestadores habilitados que simplemente no recibieron asignaciones durante ese período?**
+*Si son inactivos definitivos: la exclusión es correcta. Si son capacidad ociosa disponible: excluirlos perpetúa el desbalance actual — el modelo nunca los considerará para nuevas asignaciones, que es exactamente el problema que el reto quiere resolver.*
+
+**Q23. Los valores de `PERFIL_TARIFA` en el catálogo (A, B, E, I, O, P, T, X) se trataron como categorías nominales sin jerarquía. ¿Existe una progresión o ranking entre estos perfiles que refleje nivel de servicio o costo?**
+*Si existe jerarquía, el campo debería codificarse ordinalmente, añadiendo una dimensión económica al vector de features que actualmente no está capturada.*
+
+---
+
+## 7. Diseño del modelo de clustering (Fase 2)
+
+**Q24. Ante el trade-off entre especialización técnica (asignar al más calificado), eficiencia logística (asignar al más cercano) y balance de carga (asignar al menos ocupado) — ¿cuál es la jerarquía de prioridades desde el negocio?**
+*Determina qué dimensión de features debe tener mayor peso relativo en el clustering. Puede implementarse con escalado diferenciado por dimensión antes de K-Means sin modificar la capa Gold.*
+
+**Q25. Los datos muestran que 2 prestadores concentran el 34.4% de todas las órdenes históricas (índice de Gini = 0.757). ¿Esa concentración es una decisión estratégica deliberada o un síntoma del problema que se quiere resolver?**
+*Si es deliberada: el modelo debe respetar esa concentración o justificar cuándo romperla. Si es un accidente del modelo actual: reducir el índice de Gini es el objetivo explícito del clustering y el indicador de impacto más directo del reto.*
+
+**Q26. ¿Cuántos clústeres de prestadores serían manejables operativamente para el equipo que va a usar el modelo?**
+*Si el equipo puede gestionar máximo 5 segmentos, K=5 es el techo del modelo aunque el método del codo sugiera K=8. Un modelo técnicamente óptimo pero operativamente inmanejable no se adopta.*
+
+---
+
+## 8. Optimización de asignación (Fase 3)
+
+**Q27. Las cancelaciones clasificadas como "causas del sistema" representan el 79.3% de las 229.824 cancelaciones registradas en 2025. ¿A qué se deben principalmente desde la perspectiva operativa — sobrecarga del prestador, incapacidades, problemas de agenda, u otros?**
+*Si son por sobrecarga, `utilizacion_capacidad` es el feature más crítico del modelo y reducirlo es el objetivo central. Si son por causas externas no controlables, el modelo de clustering no puede reducirlas y el argumento de impacto debe ajustarse.*
+
+**Q28. ¿Hay empresas que cancelan de forma sistemática y SURA lo tolera por su importancia comercial? ¿Debe el modelo tener en cuenta el historial de cancelaciones de la empresa al evaluar el desempeño del prestador?**
+*Un prestador puede tener alta tasa de cancelación no porque sea poco confiable, sino porque le asignan empresas que sistemáticamente cancelan. Confirmar este fenómeno justifica incluir el comportamiento histórico de la empresa como variable en el motor de asignación.*
+
+**Q29. Los datos muestran 665 municipios con demanda de empresas activas pero sin ningún prestador local registrado en el catálogo. ¿Es cubrir esas brechas geográficas un objetivo activo de este proyecto?**
+*Si es un objetivo activo, el modelo puede ir más allá del clustering de asignación y entregar un mapa de brechas: "en estos municipios se necesita un prestador del clúster X". Esto amplía el valor de negocio de la solución más allá de la optimización de la red existente.*

@@ -31,7 +31,7 @@ resource "google_bigquery_dataset" "cleaned_data" {
   location                    = "US"
 }
 
-# 4. Gold Layer: Processed Data Dataset
+# 4. Gold Layer: Feature tables para clustering y asignación
 resource "google_bigquery_dataset" "processed_data" {
   dataset_id                  = "sura_clustering_processed"
   project                     = "proyecto-sura-clustering-2026"

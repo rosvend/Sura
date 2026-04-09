@@ -35,14 +35,16 @@ Este archivo es el diccionario de datos del proyecto. Describe cada variable de 
 
 **Formato:** Excel (.xlsx), 4 hojas
 
-**Columnas:** 37
+**Columnas:** 38 (37 originales + `_RED_ORIGEN` agregada en ingesta para identificar la hoja de origen)
+
+> ⚠️ **Nota de ingesta:** `pl.read_excel()` sin parámetros lee solo la primera hoja. Se corrigió en `src/ingestion/extract.py` con `_read_all_sheets()` que concatena las 4 hojas. La capa Silver trabaja con las **2.812.076 filas combinadas**. Las cardinalidades de este documento reflejan el dataset completo — los valores parciales del análisis exploratorio inicial (basado en CGR únicamente) están desactualizados.
 
 **Hojas:**
 
-- `CGR` — Red principal (Coordinación General de Red)
-- `Red_otras_ofic` — Red de otras oficinas regionales
-- `Red_med&Cali` — Red de Medellín y Cali
-- `Red_Bogota` — Red de Bogotá
+- `CGR` — Red principal / Coordinación General de Red (~663.503 filas)
+- `Red_otras_ofic` — Red de otras oficinas regionales (~736.923 filas)
+- `Red_med&Cali` — Red de Medellín y Cali (~486.099 filas)
+- `Red_Bogota` — Red de Bogotá (~925.551 filas)
 
 ### Descripción
 
@@ -56,17 +58,17 @@ Este archivo es el **catálogo maestro de prestadores**. Contiene la lista de as
 | `NOMBRE_PRESTADOR`                    | Nombre del asesor                                                                                               |
 | `DNI_DISTRIBUIDOR`                    | Identificador de la firma prestadora (NIT)                                                                      |
 | `CDOFICINA` / `DSOFICINA`             | Oficina regional (8 oficinas: Medellín, Bogotá, Cali, Barranquilla, Bucaramanga, Cartagena, Manizales, Pereira) |
-| `CDPRODUCTO` / `DSPRODUCTO`           | Producto o programa de servicio (39 categorías)                                                                 |
-| `CDBLOQUE` / `DSBLOQUE`               | Bloque temático al que pertenece la tarea (89 bloques)                                                          |
-| `CDTAREA` / `DSTAREA`                 | Tarea específica habilitada para el prestador (1.066 tareas)                                                    |
-| `DSCLASIFICACION`                     | Tipo de servicio: Asesoría, Capacitación, Promoción, etc.                                                       |
-| `DSTIPO_PERFIL`                       | Nivel del prestador: Básico, Medio, Avanzado, Especializado                                                     |
-| `PERFIL_TARIFA`                       | Perfil tarifario (A, B, C, D)                                                                                   |
-| `FUNCION_PRESTADOR`                   | Rol del prestador: Asesor en Prevención, Asesor en Riesgos, etc.                                                |
+| `CDPRODUCTO` / `DSPRODUCTO`           | Producto o programa de servicio (**79 categorías** — las 4 redes combinadas)                                    |
+| `CDBLOQUE` / `DSBLOQUE`               | Bloque temático al que pertenece la tarea (**104 bloques** — las 4 redes combinadas)                            |
+| `CDTAREA` / `DSTAREA`                 | Tarea específica habilitada para el prestador (**1.658 tareas** — las 4 redes combinadas)                       |
+| `DSCLASIFICACION`                     | Tipo de servicio (16 valores): ASESORÍA, CAPACITACIÓN, ADMINISTRATIVA, EXAMEN, LÚDICO, MATERIALES, MEDICAMENTOS, MEDICIONES AMBIENTALES, OPER. ADMINISTRATIVA, OPER. ASESORIA, OPER. CAPACITACION, OPER.REDES, PROMOCION, PROYECTOS, SERVICIO NO ENTREGADO, SERVICIOS |
+| `DSTIPO_PERFIL`                       | Nivel del prestador (8 valores): BASICO, TECNOLOGO, INTERMEDIO, PROFESIONAL, AVANZADO, EXPERTO, ESPECIALISTA, OTROS |
+| `PERFIL_TARIFA`                       | Perfil tarifario (8 valores): A, B, E, I, O, P, T, X                                                           |
+| `FUNCION_PRESTADOR`                   | Rol del prestador: Asesor en Prevención, Asesor en Riesgos, Proyectos, etc.                                     |
 | `CAPACIDAD`                           | Horas disponibles del prestador para el periodo                                                                 |
-| `CDMUNICIPIO` / `DSMUNICIPIO`         | Municipio de base del prestador                                                                                 |
+| `CDMUNICIPIO` / `DSMUNICIPIO`         | Municipio de base del prestador (**241 municipios** con cobertura — las 4 redes combinadas)                     |
 | `CDMUNICIPIO_ORIGEN_OC`               | Municipio desde el cual se origina la orden de compra                                                           |
-| `TIPO_DE_RED`                         | Tipo de red (Estratégica / Apoyo)                                                                               |
+| `TIPO_DE_RED`                         | Tipo de red (7 valores): ESTRATEGICA, APOYO, COMERCIAL, ESPECIALIZADA, MERCADEO, OPERACIONES, PROMOTORA         |
 | `SNCONTROLAR_HORAS_MES`               | Si se controla la capacidad mensual del asesor (S/N)                                                            |
 | `FEALTA_PRESTADOR`                    | Fecha de registro del prestador                                                                                 |
 | `FEC_INI_COS_TAR` / `FEC_FIN_COS_TAR` | Vigencia de la tarifa asignada                                                                                  |
@@ -100,7 +102,7 @@ Este archivo contiene el **historial completo de órdenes de compra** emitidas a
 | `Dni_Prestador` / `Nombre_Prestador`                    | Prestador asignado a la orden                                         |
 | `Nombre_Regional`                                       | Regional de la ARL (5 regionales)                                     |
 | `Codigo_Tarea` / `Tarea_Desc`                           | Tarea contratada                                                      |
-| `Codigo_Estado_Orden` / `Estado_Orden_Desc`             | Estado: Facturado, Legalizado, Aprobado, Cancelado, etc. (13 estados) |
+| `Codigo_Estado_Orden` / `Estado_Orden_Desc`             | Estado (6 valores): APROBADO, BLOQUEADO, FACTURA, FACTURADO, LEGALIZADO, PENDIENTE |
 | `Fecha_Creacion_Orden`                                  | Fecha de creación                                                     |
 | `Fecha_Entrega_Servicio` / `Fecha_Entrega_Servicio_Fin` | Ventana de entrega del servicio                                       |
 | `Valor_Costo_Unitario`                                  | Costo por unidad del servicio                                         |
@@ -158,7 +160,7 @@ Este archivo registra las **citas o visitas programadas** para la ejecución de 
 | `DURACION`                                          | Duración de la actividad (horas)                                |
 | `NMCANTIDAD_EJECUTADA`                              | Unidades efectivamente entregadas                               |
 | `NMASISTENTES`                                      | Número de asistentes                                            |
-| `DSESTADO_PROGRAMACION`                             | Estado: Cita Ejecutada, Cancelada, Programada, etc. (7 estados) |
+| `DSESTADO_PROGRAMACION`                             | Estado (7 valores): CITA EJECUTADA (84.1%), CITA CANCELADA (14.9%), CITA PROGRAMADA (0.9%), PARCIALMENTE EJECUTADO, PARCIALMENTE COMPLETADO, CITA REPROGRAMADA, RECHAZADA |
 | `FECANCELACION` / `MOTIVO_CANCELACION`              | Fecha y razón de cancelación                                    |
 | `SNCANCELA_EMPRESA`                                 | Si la cancelación fue por parte de la empresa                   |
 | `DSESTADO_INFORME`                                  | Estado del informe: Aprobado, Rechazado, Enviado, etc.          |
@@ -192,7 +194,7 @@ Este archivo es el **catálogo maestro de empresas clientes** de la ARL. Contien
 | ------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
 | `Empresa_Id`                                     | Identificador único de la empresa                                                              |
 | `ESTADO_EMPRESA_CALCULADO`                       | Estado derivado por reglas de negocio: Activa / Inactiva                                       |
-| `ESTADO_EMPRESA`                                 | Estado operativo: EN COBERTURA, EN MORA, RETIRADO                                              |
+| `ESTADO_EMPRESA`                                 | Estado operativo (4 valores): EN COBERTURA, EN MORA, RETIRADO, POR INICIAR COBERTURA           |
 | `ID_PROFESIONAL_PPAL`                            | Asesor principal asignado a la empresa                                                         |
 | `Fecha_Inicio_Cobertura` / `Fecha_Fin_Cobertura` | Vigencia de la afiliación                                                                      |
 | `Actividad_Economica_Desc`                       | Actividad económica (1.475 categorías)                                                         |
@@ -204,7 +206,7 @@ Este archivo es el **catálogo maestro de empresas clientes** de la ARL. Contien
 | `Segmentacion_Arl_Desc`                          | Segmento ARL: Gran Empresa, Mediana Empresa, Micro Empresa, Independiente, Empresa Nueva, etc. |
 | `GRUPO_ECONOMICO_ARL_ID`                         | Grupo económico al que pertenece la empresa                                                    |
 | `UEN_PPAL_ARL_ID`                                | Unidad Estratégica de Negocio principal asignada                                               |
-| `Ruta_Atencion`                                  | Ruta de atención: LIVIANA, ESTÁNDAR, SIN RUTA                                                  |
+| `Ruta_Atencion`                                  | Ruta de atención (6 valores, orden ascendente de intensidad): LIVIANA (80%), SIN RUTA (13.2%), ESTÁNDAR, INTERVENCIÓN, AVANZADA, ESPECIALIZADA |
 
 ### Relevancia
 
@@ -217,7 +219,7 @@ Permite **caracterizar la demanda**: qué tipo de empresas requieren qué tipo d
 | Archivo                                  | Tipo               | Registros         | Separador        | Rol en el reto                       |
 | ---------------------------------------- | ------------------ | ----------------- | ---------------- | ------------------------------------ |
 | `Diccionario_Datos.xlsx`                 | Metadato           | —                 | Excel            | Diccionario de variables             |
-| `Tareas_prestador_bloque.xlsx`           | Catálogo de oferta | Variable por hoja | Excel            | Perfil y capacidad del prestador     |
+| `Tareas_prestador_bloque.xlsx`           | Catálogo de oferta | 2.812.076 (4 hojas combinadas) | Excel  | Perfil y capacidad del prestador     |
 | `Ordenado.txt`                           | Transaccional      | ~607.331          | Tab              | Historial de órdenes de compra       |
 | `Tareas_Programadas_canceladas_2025.txt` | Transaccional      | ~1.542.709        | Tab              | Ejecución y cancelación de citas     |
 | `Detalle_Empresa.txt`                    | Maestro de demanda | ~2.175.102        | Virgulilla (`~`) | Caracterización de empresas clientes |
