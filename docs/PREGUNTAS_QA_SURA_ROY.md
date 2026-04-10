@@ -1,4 +1,4 @@
-# Preguntas para Q&A con ARL SURA
+# Preguntas para Q&A con ARL SURA (Roy)
 
 Este documento reúne preguntas de entendimiento de negocio para la sesión de Q&A con ARL SURA del **2026-04-10**, dentro del reto de clustering de prestadores de servicios de salud. El enfoque es exclusivamente de negocio y necesidades del cliente — no hay preguntas técnicas sobre datos, esquema o herramientas. El objetivo es cerrar los vacíos que no pudieron resolverse leyendo `RETO.md`, `DESCRIPCION_DATOS.md` ni `DIAGNOSTICO_ANALISIS.md`. Cada pregunta incluye una justificación corta para facilitar la priorización en la reunión interna de hoy donde el equipo seleccionará el set final.
 
