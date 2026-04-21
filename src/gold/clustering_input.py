@@ -38,9 +38,11 @@ _TIPO_PERFIL_ORD: dict[str, int] = {
 # canónica para el notebook: sklearn recibe df[FEATURE_COLS].
 FEATURE_COLS: list[str] = [
     # Dimensión técnica
+    # n_productos_distintos eliminado: alta correlación con n_tareas_distintas y
+    # n_bloques_distintos (las tres miden amplitud de catálogo). Conservar las tres
+    # sobrepondera esta dimensión en K-Means (distancia euclidiana).
     "n_tareas_distintas",
     "n_bloques_distintos",
-    "n_productos_distintos",
     "indice_especializacion",
     "tipo_perfil_ord",        # ordinal derivado de DSTIPO_PERFIL
 
@@ -51,7 +53,10 @@ FEATURE_COLS: list[str] = [
 
     # Dimensión de desempeño (perfil real 2025)
     "tasa_ejecucion",
-    "tasa_cancela_prestador",
+    # tasa_cancela_real_prestador reemplaza tasa_cancela_prestador:
+    # excluye cancelaciones por timeout del sistema (política de 2 meses confirmada en Q&A).
+    # tasa_cancela_prestador incluía ~79,3% de ruido de política interna.
+    "tasa_cancela_real_prestador",
     "tasa_aprobacion_informe",
     "tasa_aprobacion_auto",
     "dias_ciclo_informe_prom",
@@ -62,6 +67,11 @@ FEATURE_COLS: list[str] = [
     "n_empresas_atendidas",
     "utilizacion_capacidad",
     "pct_programaciones_campo",  # fracción de programaciones que son visitas presenciales
+
+    # Dimensión de match demanda (perfil de clientes realmente atendidos)
+    # Captura si el prestador sirve clientes de alta complejidad (Gran/Mediana Empresa)
+    # vs. clientes simples (Micro, Independiente). Prioridad #1 en Q&A: especialización.
+    "pct_empresa_compleja",
 
     # Dimensión de costo logístico
     "costo_logistico_prom",
@@ -119,12 +129,13 @@ def _imputar_nulos(df: pl.LazyFrame) -> pl.LazyFrame:
     """
     # Features que se imputan con 0
     _imputar_cero = [
-        "tasa_cancela_prestador",
+        "tasa_cancela_real_prestador",   # null = nunca tuvo cancelaciones con motivo → 0
         "tasa_aprobacion_informe",
         "tasa_aprobacion_auto",
         "duracion_promedio_ejecutada",
         "utilizacion_capacidad",
         "pct_programaciones_campo",  # null solo si n_programaciones_total == 0 (imposible para activos)
+        "pct_empresa_compleja",      # null = sin citas CAMPO ejecutadas (prestador virtual) → 0
         "costo_logistico_prom",
         "n_municipios_destino",
         "ratio_cobertura_real",      # null si sin destinos registrados o sin catálogo geográfico
@@ -157,7 +168,8 @@ def build_clustering_input() -> pl.LazyFrame:
 
     Proceso:
       1. Carga feat_prestador (perfil + desempeño, 56 cols)
-      2. Filtra a prestadores con actividad en 2025 (FLAG_SIN_ACTIVIDAD_2025=False)
+      2. Excluye prestadores sin ningún registro en TP (FLAG_SIN_ACTIVIDAD_2025=True).
+         Los prestadores virtuales (FLAG_SOLO_VIRTUAL_2025=True) sí se incluyen.
       3. Codifica tipo_perfil → ordinal; es_red_estrategica (booleano pre-computado) → Float64
       4. Imputa nulos residuales
       5. Selecciona DNI_PRESTADOR + FEATURE_COLS + columnas de contexto
@@ -172,9 +184,11 @@ def build_clustering_input() -> pl.LazyFrame:
     """
     return (
         build_prestador_features()
-        # Solo prestadores con actividad real en 2025.
-        # Los inactivos no tienen métricas de desempeño fiables; clustering
-        # con imputación masiva de nulos distorsionaría los centroides.
+        # Excluye solo los prestadores sin ningún registro en Tareas_Programadas
+        # (FLAG_SIN_ACTIVIDAD_2025). Sin datos de desempeño, la imputación masiva
+        # distorsionaría los centroides.
+        # Los prestadores FLAG_SOLO_VIRTUAL_2025 (canal virtual, ruta LIVIANA) sí se
+        # incluyen: tienen métricas de informe reales y formarán su propio segmento.
         .filter(~pl.col("FLAG_SIN_ACTIVIDAD_2025"))
         .pipe(_codificar_categoricas)
         .pipe(_imputar_nulos)
@@ -189,7 +203,7 @@ def build_clustering_input() -> pl.LazyFrame:
             # Features del modelo
             *FEATURE_COLS,
 
-            # Contexto para interpretar clusters tras el entrenamiento
+            # Contexto técnico para interpretar clusters
             "bloque_principal",
             "clasificacion_predominante",
             "tipo_perfil",
@@ -197,5 +211,11 @@ def build_clustering_input() -> pl.LazyFrame:
             "municipio_base",
             "dsoficina",
             "nombre_distribuidor",
+
+            # Contexto de demanda atendida (M3: match oferta-demanda)
+            # No entran a FEATURE_COLS (categóricas de alta cardinalidad),
+            # pero son esenciales para nombrar y validar los clusters.
+            "sector_principal_atendido",
+            "segmento_principal_atendido",
         ])
     )

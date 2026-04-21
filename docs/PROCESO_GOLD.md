@@ -63,8 +63,8 @@ GCS: archivos crudos (.txt, .xlsx)
 load_tareas_prestador()  ──► feat_prestador_perfil ──┐
                                                       ├──► feat_prestador ──► clustering_input
 load_tareas_programadas()  ┐                          │
-                           ├──► feat_prestador_perf ──┘
-load_ordenado()            ┘
+load_ordenado()            ├──► feat_prestador_perf ──┘
+load_empresas()  ──────────┘   (demanda atendida)
 
 load_empresas()          ──┐
 load_ordenado()            ├──► feat_empresa
@@ -148,7 +148,7 @@ Se usa `FECHA_INGRESO` del catálogo para calcular los días desde que el presta
 
 **Archivo:** `src/gold/feat_prestador_performance.py`
 
-**Fuentes:** `load_tareas_programadas()` + `load_ordenado()`
+**Fuentes:** `load_tareas_programadas()` + `load_ordenado()` + `load_empresas()` *(agregado — perfil de demanda)*
 
 **Grano de salida:** 1 fila por `DNI_PRESTADOR` con actividad en 2025 → **6.576 prestadores**
 
@@ -156,12 +156,14 @@ Se usa `FECHA_INGRESO` del catálogo para calcular los días desde que el presta
 
 ### Qué contiene
 
-| Grupo              | Columnas clave                                                                               |
-| ------------------ | -------------------------------------------------------------------------------------------- |
-| Ejecución de citas | `tasa_ejecucion`, `n_citas_total`, `duracion_promedio_ejecutada`, `duracion_total_ejecutada` |
-| Cancelaciones      | `tasa_cancelacion`, `tasa_cancela_empresa`, `tasa_cancela_prestador`                         |
-| Informes           | `tasa_aprobacion_informe`, `tasa_aprobacion_auto`, `dias_ciclo_informe_prom`                 |
-| Órdenes históricas | `n_oc_historicas`, `n_empresas_atendidas`, `costo_logistico_prom`, `n_municipios_destino`    |
+| Grupo              | Columnas clave                                                                                                  |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- |
+| Ejecución de citas | `tasa_ejecucion`, `n_citas_total`, `duracion_promedio_ejecutada`, `duracion_total_ejecutada`                    |
+| Cancelaciones      | `tasa_cancelacion`, `tasa_cancela_empresa`, `tasa_cancela_prestador`, `tasa_cancela_real_prestador`             |
+| Diagnóstico cancel.| `n_cancela_sin_motivo`, `n_cancela_real_prestador` *(desglose del proxy de timeout del sistema)*                |
+| Informes           | `tasa_aprobacion_informe`, `tasa_aprobacion_auto`, `dias_ciclo_informe_prom`                                    |
+| Órdenes históricas | `n_oc_historicas`, `n_empresas_atendidas`, `costo_logistico_prom`, `n_municipios_destino`                       |
+| Demanda atendida   | `sector_principal_atendido`, `segmento_principal_atendido`, `pct_empresa_compleja` *(perfil de clientes reales)*|
 
 ### Decisiones tomadas
 
@@ -222,6 +224,28 @@ Se interpretó el campo como: `True = la empresa cliente fue responsable de la c
 **⚠️ Supuesto de alto riesgo (Q19):** si el campo significa lo contrario (True = el prestador o el sistema canceló), los dos features `tasa_cancela_empresa` y `tasa_cancela_prestador` estarían **completamente invertidos**. Es el supuesto de mayor riesgo del modelo: los prestadores confiables aparecerían como problemáticos y viceversa.
 
 **Esta pregunta es prioritaria en el encuentro.**
+
+---
+
+**Decisión 4.6 — Proxy de cancelaciones por timeout del sistema (`n_cancela_sin_motivo`)**
+
+Se agrega el conteo `n_cancela_sin_motivo`: citas CAMPO canceladas donde `SNCANCELA_EMPRESA = False/null` **y** `MOTIVO_CANCELACION IS NULL`. A partir de este conteo se derivan `n_cancela_real_prestador` y `tasa_cancela_real_prestador`.
+
+**Justificación:** Q&A 2026-04-11 confirmó que el 79,3% de las cancelaciones catalogadas como "causas del sistema" se deben a la **política de timeout automático**: OC sin gestión durante 2 meses se cancela automáticamente. Estas cancelaciones no son responsabilidad real del prestador pero quedaban absorbidas en `tasa_cancela_prestador`, penalizando injustamente a prestadores que atienden clientes difíciles de coordinar. El MOTIVO_CANCELACION tiende a quedar nulo en estas cancelaciones automáticas ("la mayoría está vacío o de cancelación por proceso de bajar colas desde SGS", Q&A transcripción). `tasa_cancela_real_prestador` reemplaza a `tasa_cancela_prestador` en `FEATURE_COLS` por ser una señal más limpia de fallo real del prestador.
+
+**Limitación documentada:** `n_cancela_sin_motivo` es una heurística. Un prestador que cancela sin documentar el motivo también quedaría en este conteo, aunque su cancelación sea real y no un timeout. Se necesita exploración de los valores de `MOTIVO_CANCELACION` para refinar el proxy. `tasa_cancela_prestador` se conserva en `feat_prestador` para diagnóstico comparativo.
+
+**Invariante:** `n_cancela_sin_motivo ≤ n_cancela_prestador` siempre (es un subconjunto).
+
+---
+
+**Decisión 4.7 — Perfil de demanda atendida (`_demanda_atendida()`)**
+
+Se agrega la función `_demanda_atendida()` que une citas CAMPO ejecutadas (Tareas_Programadas) con el catálogo de empresas (Detalle_Empresa) para computar, por `DNI_PRESTADOR`: el sector económico predominante de los clientes atendidos (`sector_principal_atendido`), la segmentación ARL predominante (`segmento_principal_atendido`) y la fracción de citas en empresas de alta complejidad — Gran Empresa o Mediana Empresa — (`pct_empresa_compleja`).
+
+**Justificación:** El Q&A 2026-04-11 confirmó que la **prioridad #1 de asignación es la especialización técnica** del prestador para el tipo de cliente. Sin embargo, el catálogo solo captura el perfil *declarado* (qué tareas está habilitado a ejecutar); no dice nada sobre qué tipos de empresas atiende realmente. `pct_empresa_compleja` cierra esta brecha: un prestador que consistentemente atiende Gran Empresa trabaja en un registro de complejidad diferente al que atiende Micro empresas o independientes, aunque ambos tengan el mismo `tipo_perfil` declarado. Esta feature entra directamente a `FEATURE_COLS` como feature numérica; las categóricas (`sector_principal_atendido`, `segmento_principal_atendido`) viajan como columnas de contexto en `clustering_input` para nombrar y validar los clústeres.
+
+**Nota de implementación:** Solo se consideran citas CAMPO *ejecutadas* (no programadas, no canceladas). Captura el perfil de clientes *realmente servidos*, que es más informativo que el perfil de clientes asignados. La llave de join es `DNI_EMPRESA` (Tareas_Programadas) → `Empresa_Id` (Detalle_Empresa), confirmada como la misma entidad en ER_DIAGRAMA.md.
 
 ---
 
@@ -297,19 +321,22 @@ Condición: `n_citas_total IS NULL OR n_citas_total == 0`
 
 **Grano de salida:** 1 fila por `DNI_PRESTADOR` activo en 2025
 
-**Columnas:** 30 (1 ID + 22 features numéricas + 7 columnas de contexto)
+**Columnas:** 32 (1 ID + 22 features numéricas + 9 columnas de contexto)
 
 Esta es la única tabla que recibe el notebook de modelado. Su responsabilidad es entregar un DataFrame numérico, sin nulos, listo para aplicar `StandardScaler` o `MinMaxScaler` y luego el algoritmo de clustering seleccionado.
 
 ### Las 22 features del modelo
 
-| Dimensión             | Features                                                                                                                                                                                         | Justificación de la dimensión                              |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
-| **Técnica**           | `n_tareas_distintas`, `n_bloques_distintos`, `n_productos_distintos`, `indice_especializacion`, `tipo_perfil_ord`                                                                                | Alcance y profundidad técnica declarada                    |
-| **Geográfica**        | `n_municipios_cobertura`, `n_municipios_destino`, `ratio_cobertura_real`                                                                                                                         | Alcance territorial declarado vs. real vs. su ratio        |
-| **Desempeño**         | `tasa_ejecucion`, `tasa_cancela_prestador`, `tasa_aprobacion_informe`, `tasa_aprobacion_auto`, `dias_ciclo_informe_prom`, `duracion_promedio_ejecutada` | Calidad de la operación de campo 2025                      |
-| **Carga**             | `n_citas_total`, `n_empresas_atendidas`, `utilizacion_capacidad`, `pct_programaciones_campo`                                                                                                     | Volumen, cobertura y mix de trabajo del prestador          |
-| **Red y costo**       | `costo_logistico_prom`, `es_red_estrategica`, `n_redes`, `antiguedad_dias`                                                                                                                       | Posicionamiento en la red, costo y experiencia             |
+| Dimensión             | Features                                                                                                                                                                                                  | Justificación de la dimensión                                        |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| **Técnica**           | `n_tareas_distintas`, `n_bloques_distintos`, `indice_especializacion`, `tipo_perfil_ord`                                                                                                                  | Amplitud y foco técnico declarado. `n_productos_distintos` eliminado: correlación > 0.85 con las otras dos — sobrepondera la dimensión en K-Means |
+| **Geográfica**        | `n_municipios_cobertura`, `n_municipios_destino`, `ratio_cobertura_real`                                                                                                                                  | Alcance territorial declarado vs. real vs. su ratio                  |
+| **Desempeño**         | `tasa_ejecucion`, `tasa_cancela_real_prestador`, `tasa_aprobacion_informe`, `tasa_aprobacion_auto`, `dias_ciclo_informe_prom`, `duracion_promedio_ejecutada`                                               | Calidad real de campo 2025. `tasa_cancela_real_prestador` excluye timeouts del sistema (Decisión 4.6)   |
+| **Carga**             | `n_citas_total`, `n_empresas_atendidas`, `utilizacion_capacidad`, `pct_programaciones_campo`                                                                                                              | Volumen, cobertura y mix de trabajo del prestador                    |
+| **Match demanda**     | `pct_empresa_compleja`                                                                                                                                                                                    | Fracción de citas en Gran/Mediana Empresa. Conecta perfil técnico con complejidad real de clientes atendidos (Decisión 4.7) |
+| **Red y costo**       | `costo_logistico_prom`, `es_red_estrategica`, `n_redes`, `antiguedad_dias`                                                                                                                                | Posicionamiento en la red, costo y experiencia                       |
+
+**Columnas de contexto (no entran al modelo):** `bloque_principal`, `clasificacion_predominante`, `tipo_perfil`, `tipo_red`, `municipio_base`, `dsoficina`, `nombre_distribuidor`, `sector_principal_atendido`, `segmento_principal_atendido`
 
 ### Decisiones tomadas
 
@@ -346,10 +373,10 @@ OTROS → imputación por mediana
 
 Se aplicaron dos estrategias distintas según el tipo de nulo:
 
-- **Imputación por cero** para tasas y duraciones donde `NULL` significa "nunca ocurrió": `tasa_cancela_prestador`, `tasa_aprobacion_informe`, `tasa_aprobacion_auto`, `duracion_promedio_ejecutada`, `costo_logistico_prom`, etc.
+- **Imputación por cero** para tasas y duraciones donde `NULL` significa "nunca ocurrió": `tasa_cancela_real_prestador`, `tasa_aprobacion_informe`, `tasa_aprobacion_auto`, `duracion_promedio_ejecutada`, `pct_empresa_compleja`, `costo_logistico_prom`, etc.
 - **Imputación por mediana** para variables donde `NULL` significa "no se pudo calcular" y el cero no es el valor correcto: `dias_ciclo_informe_prom` (si no hay informes, no es que el ciclo sea 0 días), `tipo_perfil_ord` (si el perfil no está en el catálogo, se asigna el valor típico de la red).
 
-**Justificación:** Imputar cero en una tasa que nunca se activó es correcto por conocimiento de dominio: si un prestador no tuvo cancelaciones, su tasa es efectivamente 0, no un valor desconocido. Imputar cero en el ciclo de informe sería incorrecto porque distorsionaría la distribución de una variable que sí tiene valores reales positivos.
+**Justificación:** Imputar cero en una tasa que nunca se activó es correcto por conocimiento de dominio: si un prestador no tuvo cancelaciones, su tasa es efectivamente 0, no un valor desconocido. `pct_empresa_compleja = 0` para prestadores virtuales (FLAG_SOLO_VIRTUAL_2025) es correcto: sin visitas de campo ejecutadas no hay perfil de cliente complejo atendido. Imputar cero en el ciclo de informe sería incorrecto porque distorsionaría la distribución de una variable que sí tiene valores reales positivos.
 
 ---
 
@@ -365,9 +392,25 @@ La normalización de features NO se aplica en esta tabla. `clustering_input` ent
 
 **Decisión 6.5 — Columnas de contexto separadas de features**
 
-Las columnas `tipo_perfil_predominante`, `funcion_predominante`, `clasificacion_predominante`, `tipo_red_principal`, `bloque_principal`, `municipio_base` y `FLAG_SIN_ACTIVIDAD_2025` viajan en la tabla pero **no están en `FEATURE_COLS`**.
+Las columnas `tipo_perfil`, `funcion_prestador`, `clasificacion_predominante`, `tipo_red`, `bloque_principal`, `municipio_base`, `dsoficina`, `nombre_distribuidor`, `sector_principal_atendido` y `segmento_principal_atendido` viajan en la tabla pero **no están en `FEATURE_COLS`**.
 
-**Justificación:** Estas columnas son categóricas con cardinalidad alta o son texto descriptivo. No son apropiadas para K-Means directamente, pero son esenciales para interpretar y nombrar los clústeres una vez que el modelo entrega sus resultados. Tenerlas en la misma tabla evita hacer un join posterior en el notebook solo para labeling.
+**Justificación:** Estas columnas son categóricas con cardinalidad alta o son texto descriptivo. No son apropiadas para K-Means directamente, pero son esenciales para interpretar y nombrar los clústeres una vez que el modelo entrega sus resultados. Tenerlas en la misma tabla evita hacer un join posterior en el notebook solo para labeling. `sector_principal_atendido` y `segmento_principal_atendido` se agregaron en la revisión de la capa Gold (ver §8b) como contexto de demanda atendida.
+
+---
+
+**Decisión 6.6 — Eliminación de `n_productos_distintos` de `FEATURE_COLS`**
+
+Se eliminó `n_productos_distintos` del vector de features. Sigue existiendo en `feat_prestador` como columna informativa.
+
+**Justificación:** Las tres features de amplitud técnica (`n_tareas_distintas`, `n_bloques_distintos`, `n_productos_distintos`) tienen correlación estimada > 0.85 entre sí, ya que las tareas son subconjunto de los bloques, y los bloques subconjunto de los productos. Conservarlas tres en la misma distancia euclidiana de K-Means triplica el peso implícito de la dimensión de amplitud respecto a desempeño y geografía. Se conserva `n_tareas_distintas` (mayor granularidad) y `n_bloques_distintos` (captura diversidad temática, relevante para el matching especialización-cliente).
+
+---
+
+**Decisión 6.7 — `tasa_cancela_real_prestador` reemplaza `tasa_cancela_prestador` en `FEATURE_COLS`**
+
+`tasa_cancela_prestador` sigue existiendo en `feat_prestador` para diagnóstico, pero ya no entra al modelo de clustering. Su sucesor en `FEATURE_COLS` es `tasa_cancela_real_prestador`.
+
+**Justificación:** Ver Decisión 4.6. `tasa_cancela_prestador` incluía el ruido de cancelaciones automáticas por timeout del sistema (~79,3% de las "causas del sistema" según Q&A). `tasa_cancela_real_prestador` filtra ese ruido restando `n_cancela_sin_motivo` del numerador. El resultado es una señal más informativa para separar prestadores confiables de los que genuinamente tienen problemas de gestión de citas.
 
 ---
 
@@ -395,17 +438,63 @@ Cada tabla se carga con `WRITE_TRUNCATE`: en cada ejecución se borra y reescrib
 
 ## 8. Resumen de supuestos que requieren validación
 
-Los siguientes supuestos fueron necesarios para construir Gold pero no han sido confirmados con el negocio. Si alguno resulta incorrecto, se indica qué tabla y qué feature debe recalcularse.
+Los siguientes supuestos fueron necesarios para construir Gold. La columna **Estado** refleja el resultado del encuentro Q&A del 2026-04-11 con el equipo de SURA.
 
-| #   | Supuesto                                                                          | Feature afectada                                 | Pregunta a hacer |
-| --- | --------------------------------------------------------------------------------- | ------------------------------------------------ | ---------------- |
-| 1   | `DSTIPO_PERFIL` tiene jerarquía BASICO → ESPECIALISTA                             | `tipo_perfil_ord`                                | Q17              |
-| 2   | `CAPACIDAD` está en horas del mismo período que `duracion_total_ejecutada`        | `utilizacion_capacidad`                          | Q18              |
-| 3   | `SNCANCELA_EMPRESA = True` significa que la empresa cliente canceló               | `tasa_cancela_empresa`, `tasa_cancela_prestador` | Q19              |
-| 4   | `PARCIALMENTE EJECUTADO` es un servicio entregado exitosamente                    | `tasa_ejecucion`, `tasa_cancelacion`             | Q20              |
-| 5   | `FECHA_INGRESO` registra la fecha de incorporación real a la red                  | `antiguedad_dias`                                | Q21              |
-| 6   | Los prestadores con `FLAG_SIN_ACTIVIDAD_2025` son inactivos (no capacidad ociosa) | Decisión de exclusión del clustering             | Q22              |
-| 7   | `PERFIL_TARIFA` (A,B,E,I,O,P,T,X) es nominal sin jerarquía                        | No incluida en features actualmente              | Q23              |
+| #   | Supuesto                                                                          | Feature afectada                                 | Pregunta | Estado |
+| --- | --------------------------------------------------------------------------------- | ------------------------------------------------ | -------- | ------ |
+| 1   | `DSTIPO_PERFIL` tiene jerarquía BASICO → ESPECIALISTA                             | `tipo_perfil_ord`                                | Q17      | ⚠️ No preguntado — pendiente |
+| 2   | `CAPACIDAD` está en horas del mismo período que `duracion_total_ejecutada`        | `utilizacion_capacidad`                          | Q18      | ⚠️ No preguntado — pendiente |
+| 3   | `SNCANCELA_EMPRESA = True` significa que la empresa cliente canceló               | `tasa_cancela_empresa`, `tasa_cancela_prestador` | Q19      | ⚠️ No preguntado — alto riesgo |
+| 4   | `PARCIALMENTE EJECUTADO` es un servicio entregado exitosamente                    | `tasa_ejecucion`, `tasa_cancelacion`             | Q20      | ⚠️ No preguntado — pendiente |
+| 5   | `FECHA_INGRESO` registra la fecha de incorporación real a la red                  | `antiguedad_dias`                                | Q21      | ⚠️ No preguntado — pendiente |
+| 6   | Los prestadores con `FLAG_SIN_ACTIVIDAD_2025` son inactivos (no capacidad ociosa) | Decisión de exclusión del clustering             | Q22      | ⚠️ No preguntado — pendiente |
+| 7   | `PERFIL_TARIFA` (A,B,E,I,O,P,T,X) es nominal sin jerarquía                        | No incluida en features actualmente              | Q23      | ⚠️ No preguntado — bajo riesgo |
+
+---
+
+## 8b. Confirmaciones y ajustes del encuentro Q&A (2026-04-11)
+
+### Confirmaciones que no requieren cambio de código
+
+**ESTADO_EMPRESA — "Retirado = desafiliado" (Q3)**
+
+Confirmado por SURA: `ESTADO_EMPRESA = "RETIRADO"` significa empresa desafiliada, sin cobertura activa. "En mora" significa cobertura vigente con deuda pendiente. Se agregó el flag `FLAG_EMPRESA_ACTIVA = (ESTADO_EMPRESA != "RETIRADO")` a `feat_empresa`. Las empresas retiradas no deben ser objetivo del modelo de asignación.
+
+**Rutas de atención — LIVIANA = atención virtual (Q3)**
+
+Confirmado: LIVIANA comprende empresas pequeñas, independientes y voluntarios. El modelo de atención es 100% virtual (documentos, herramientas digitales, mensajería). No generan visitas de campo. Esto valida el diseño actual de `nivel_complejidad_calculado` y explica por qué muchas empresas LIVIANA tienen `FLAG_SIN_DEMANDA_HISTORICA = True` en programaciones de campo.
+
+**Implicación para el notebook:** el modelo de clustering de prestadores está orientado a visitas ESTÁNDAR, INTERVENCIÓN, AVANZADA y ESPECIALIZADA. Las empresas LIVIANA y SIN RUTA pueden excluirse del matching con prestadores de campo.
+
+**Prioridad de asignación — Especialización > Capacidad > Geografía (Q6)**
+
+Confirmado por SURA: la prioridad es (1) que el prestador tenga la especialidad técnica, (2) que tenga disponibilidad de tiempo, (3) que esté en la zona. No hay restricción geográfica estricta; la cercanía es un deseable, no un requisito.
+
+**Implicación para el notebook:** la dimensión Técnica (`n_tareas_distintas`, `tipo_perfil_ord`, `indice_especializacion`) debe tener mayor peso relativo que la dimensión Geográfica en el escalado de features. En StandardScaler esto se puede lograr con escalado diferenciado por dimensión.
+
+**Cancelaciones "causas del sistema" = política de timeout (Q8)**
+
+Confirmado: el 79,3% de cancelaciones catalogadas como "causas del sistema" se deben a la **política de cancelación automática**: si una cita no es gestionada (no se llega a acuerdo entre cliente y proveedor) en el plazo establecido (antes 3 meses, ahora 2 meses), el sistema la cancela automáticamente.
+
+**Implicación para `tasa_cancela_prestador`:** esta tasa incluye cancelaciones por timeout que no son responsabilidad directa del prestador. El valor absoluto de `tasa_cancela_prestador` sobreestima la "falla" del prestador. Para el modelo, es más informativa en términos comparativos (prestadores con tasa alta vs. baja entre sí) que en términos absolutos. La separación vía `SNCANCELA_EMPRESA` ya captura parte de la distinción, pero el timeout del sistema queda en el bucket del prestador.
+
+**Relación OC → citas (Q2 confirmado)**
+
+Una orden de compra puede tener tantas citas como sean necesarias. Si una cita se cancela, otra puede ser programada dentro de la misma OC. Esto valida el diseño de `feat_prestador_performance` que cuenta citas individuales como unidad de análisis, no órdenes.
+
+### Cambios de código aplicados
+
+| Cambio | Archivo | Detalle |
+| ------ | ------- | ------- |
+| Agregado `FLAG_EMPRESA_ACTIVA` | `src/gold/feat_empresa.py` | `True` si `ESTADO_EMPRESA != "RETIRADO"`. Basado en confirmación Q3. |
+| Split de `FLAG_SIN_ACTIVIDAD_2025` | `src/gold/feat_prestador.py` | Se separó en dos flags: `FLAG_SIN_ACTIVIDAD_2025` (sin registro alguno en TP, ~225 prestadores) y `FLAG_SOLO_VIRTUAL_2025` (solo INFORME, sin campo, 318 prestadores). Los virtuales ahora se incluyen en el clustering. |
+| Actualizado filtro clustering | `src/gold/clustering_input.py` | El filtro ahora excluye solo `FLAG_SIN_ACTIVIDAD_2025`. Los 318 prestadores virtuales entran al modelo y formarán su propio segmento. El universo sube de ~5.162 a ~5.480 prestadores. |
+| Proxy timeout del sistema (M1) | `src/gold/feat_prestador_performance.py` | Agregados `n_cancela_sin_motivo`, `n_cancela_real_prestador`, `tasa_cancela_real_prestador`. Decisión 4.6. |
+| Perfil de demanda atendida (M3) | `src/gold/feat_prestador_performance.py` | Nueva función `_demanda_atendida()` con join TP ← Detalle_Empresa. Agrega `sector_principal_atendido`, `segmento_principal_atendido`, `pct_empresa_compleja`. Decisión 4.7. |
+| Propagación columnas nuevas | `src/gold/feat_prestador.py` | Select actualizado: +6 columnas de M1 y M3. |
+| Depuración `FEATURE_COLS` (M2) | `src/gold/clustering_input.py` | Eliminado `n_productos_distintos` (correlación redundante). Decisión 6.6. |
+| Reemplazo en `FEATURE_COLS` (M1) | `src/gold/clustering_input.py` | `tasa_cancela_prestador` → `tasa_cancela_real_prestador`. Imputación: añadida a `_imputar_cero`. Decisión 6.7. |
+| Nueva feature en `FEATURE_COLS` (M3) | `src/gold/clustering_input.py` | `pct_empresa_compleja` añadida a `FEATURE_COLS` e `_imputar_cero`. Contexto: `sector_principal_atendido` y `segmento_principal_atendido` añadidos al select. Decisión 6.5. |
 
 ---
 
@@ -415,11 +504,13 @@ Los siguientes supuestos fueron necesarios para construir Gold pero no han sido 
 BigQuery: sura_clustering_processed
 │
 ├── feat_prestador_perfil      (6.514 filas × 28 cols)  — perfil técnico catálogo
-├── feat_prestador_performance (6.576 filas × 31 cols)  — KPIs operativos 2025
-├── feat_prestador             (6.514 filas × 61 cols)  — tabla maestra oferta
+├── feat_prestador_performance (6.576 filas × 37 cols)  — KPIs operativos 2025 (+6 cols: M1/M3)
+├── feat_prestador             (6.514 filas × 67 cols)  — tabla maestra oferta (+6 cols: M1/M3)
 ├── feat_empresa               (2.175.102 filas × 38 cols) — tabla maestra demanda
-└── clustering_input           (5.162 filas × 30 cols)  — input directo para ML
+└── clustering_input           (~5.480 filas × 32 cols) — input directo para ML (+2 context cols)
 ```
+
+> **FEATURE_COLS activas (22 features):** `n_tareas_distintas`, `n_bloques_distintos`, `indice_especializacion`, `tipo_perfil_ord`, `n_municipios_cobertura`, `n_municipios_destino`, `ratio_cobertura_real`, `tasa_ejecucion`, `tasa_cancela_real_prestador`, `tasa_aprobacion_informe`, `tasa_aprobacion_auto`, `dias_ciclo_informe_prom`, `duracion_promedio_ejecutada`, `n_citas_total`, `n_empresas_atendidas`, `utilizacion_capacidad`, `pct_programaciones_campo`, `pct_empresa_compleja`, `costo_logistico_prom`, `es_red_estrategica`, `n_redes`, `antiguedad_dias`
 
 ### Observaciones de la primera carga a BigQuery
 

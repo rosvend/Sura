@@ -15,7 +15,7 @@ Uso:
 
 import polars as pl
 
-from src.silver.extract import load_ordenado, load_tareas_programadas
+from src.silver.extract import load_empresas, load_ordenado, load_tareas_programadas
 
 # ── Constantes de dominio ────────────────────────────────────────────────────
 # Estados de DSESTADO_PROGRAMACION verificados contra el dataset (7 valores)
@@ -31,6 +31,10 @@ _ESTADO_CANCELADA = "CITA CANCELADA"
 
 # Estado del informe tras normalización Silver ("AP" → "APROBADO", etc.)
 _ESTADO_INFORME_APROBADO = "APROBADO"
+
+# Segmentaciones ARL que corresponden a empresas de alta complejidad.
+# Confirmado en DESCRIPCION_DATOS.md. Determina pct_empresa_compleja.
+_SEGMENTOS_COMPLEJOS = frozenset(["Gran Empresa", "Mediana Empresa"])
 
 
 # ── Bloques internos ─────────────────────────────────────────────────────────
@@ -108,6 +112,19 @@ def _kpis_programaciones() -> pl.LazyFrame:
                 & (pl.col("DSESTADO_PROGRAMACION") == _ESTADO_CANCELADA)
                 & (pl.col("TIPO_PROGRAMACION") == "CAMPO")
             ).sum().alias("n_cancela_empresa"),
+
+            # ── Cancelaciones sin motivo documentado — proxy de timeout (CAMPO) ──
+            # SURA confirmó (Q&A 2026-04-11) que el 79,3% de las cancelaciones
+            # por "causas del sistema" se deben a la política de timeout automático:
+            # OC sin gestión durante 2 meses → el sistema las cancela sin registrar
+            # motivo explícito. Este conteo aísla ese ruido de la métrica de fallo
+            # real del prestador. Invariante: n_cancela_sin_motivo ≤ n_cancela_prestador.
+            (
+                (~pl.col("SNCANCELA_EMPRESA").fill_null(False))
+                & (pl.col("DSESTADO_PROGRAMACION") == _ESTADO_CANCELADA)
+                & (pl.col("TIPO_PROGRAMACION") == "CAMPO")
+                & pl.col("MOTIVO_CANCELACION").is_null()
+            ).sum().alias("n_cancela_sin_motivo"),
 
             # ── Duración (CAMPO ejecutadas) ───────────────────────────────────
             # DURACION tiene ~41% de nulos en el dataset completo. Los nulos se
@@ -191,6 +208,85 @@ def _kpis_ordenado() -> pl.LazyFrame:
     )
 
 
+def _demanda_atendida() -> pl.LazyFrame:
+    """Perfil de la demanda empresarial realmente atendida por cada prestador en 2025.
+
+    Fuente: Tareas_Programadas (citas CAMPO ejecutadas) ← Detalle_Empresa (perfil empresa).
+    Llave de join: DNI_EMPRESA → Empresa_Id (misma entidad, confirmado en ER_DIAGRAMA.md).
+
+    Solo se consideran citas CAMPO ejecutadas: captura el perfil de a quién sirve
+    realmente el prestador, no a quién tiene programado. Esto es el puente entre la
+    oferta técnica declarada (catálogo) y la demanda real atendida, factor clave para
+    el matching empresa ↔ prestador (prioridad #1 confirmada en Q&A 2026-04-11).
+
+    Columnas de salida
+    ──────────────────
+    sector_principal_atendido    Sector económico predominante de los clientes atendidos.
+                                 Contexto para clustering; no entra a FEATURE_COLS directamente.
+    segmento_principal_atendido  Segmentación ARL predominante (Gran Empresa, Mediana, Micro...).
+                                 Contexto para clustering; no entra a FEATURE_COLS directamente.
+    pct_empresa_compleja         Fracción de citas ejecutadas para Gran Empresa o Mediana Empresa.
+                                 Feature directamente usable: captura si el prestador atiende
+                                 clientes de alta complejidad (Avanzado/Especializado) o clientes
+                                 simples (Micro, Independiente, Liviana).
+    """
+    tp_campo_exec = (
+        load_tareas_programadas()
+        .filter(
+            (pl.col("TIPO_PROGRAMACION") == "CAMPO")
+            & pl.col("DSESTADO_PROGRAMACION").is_in(list(_ESTADOS_EJECUTADA))
+        )
+        .select(["DNI_PRESTADOR", "DNI_EMPRESA"])
+    )
+
+    empresas = (
+        load_empresas()
+        .select(["Empresa_Id", "Sector_Economico_Desc", "Segmentacion_Arl_Desc"])
+    )
+
+    joined = tp_campo_exec.join(
+        empresas, left_on="DNI_EMPRESA", right_on="Empresa_Id", how="left"
+    )
+
+    # Sector predominante: patrón sort-and-take (equivalente a moda)
+    sector_top = (
+        joined
+        .group_by(["DNI_PRESTADOR", "Sector_Economico_Desc"])
+        .agg(pl.len().alias("_cnt"))
+        .sort("_cnt", descending=True)
+        .group_by("DNI_PRESTADOR")
+        .agg(pl.col("Sector_Economico_Desc").first().alias("sector_principal_atendido"))
+    )
+
+    # Segmentación ARL predominante: mismo patrón
+    segmento_top = (
+        joined
+        .group_by(["DNI_PRESTADOR", "Segmentacion_Arl_Desc"])
+        .agg(pl.len().alias("_cnt"))
+        .sort("_cnt", descending=True)
+        .group_by("DNI_PRESTADOR")
+        .agg(pl.col("Segmentacion_Arl_Desc").first().alias("segmento_principal_atendido"))
+    )
+
+    # KPI numérico: fracción de citas en empresas de alta complejidad
+    kpis = (
+        joined
+        .group_by("DNI_PRESTADOR")
+        .agg(
+            pl.col("Segmentacion_Arl_Desc")
+            .is_in(list(_SEGMENTOS_COMPLEJOS))
+            .mean()
+            .alias("pct_empresa_compleja"),
+        )
+    )
+
+    return (
+        sector_top
+        .join(segmento_top, on="DNI_PRESTADOR", how="left")
+        .join(kpis, on="DNI_PRESTADOR", how="left")
+    )
+
+
 # ── API pública ──────────────────────────────────────────────────────────────
 
 def build_performance_features() -> pl.LazyFrame:
@@ -225,10 +321,12 @@ def build_performance_features() -> pl.LazyFrame:
     """
     prog = _kpis_programaciones()
     oc = _kpis_ordenado()
+    demanda = _demanda_atendida()
 
     return (
         prog
         .join(oc, on="DNI_PRESTADOR", how="left")
+        .join(demanda, on="DNI_PRESTADOR", how="left")
         .with_columns([
             # Tasa de ejecución: citas con resultado / total asignadas
             pl.when(pl.col("n_citas_total") > 0)
@@ -267,12 +365,26 @@ def build_performance_features() -> pl.LazyFrame:
             (pl.col("n_citas_canceladas") - pl.col("n_cancela_empresa"))
             .alias("n_cancela_prestador"),
         ])
-        # Tasa de cancelación del prestador (calculada después para reusar
-        # n_cancela_prestador recién creada)
-        .with_columns(
+        # n_cancela_real_prestador: cancellaciones con motivo documentado.
+        # Excluye n_cancela_sin_motivo (proxy de timeouts del sistema, Q8).
+        # Se calcula en paso separado para poder reusar n_cancela_prestador.
+        .with_columns([
             pl.when(pl.col("n_citas_total") > 0)
             .then(pl.col("n_cancela_prestador") / pl.col("n_citas_total"))
             .otherwise(None)
-            .alias("tasa_cancela_prestador")
+            .alias("tasa_cancela_prestador"),
+
+            (pl.col("n_cancela_prestador") - pl.col("n_cancela_sin_motivo"))
+            .clip(lower_bound=0)
+            .alias("n_cancela_real_prestador"),
+        ])
+        # tasa_cancela_real_prestador: requiere n_cancela_real_prestador del paso anterior.
+        # Señal más limpia que tasa_cancela_prestador para el modelo de clustering:
+        # excluye el ruido de las cancelaciones automáticas por política de timeout.
+        .with_columns(
+            pl.when(pl.col("n_citas_total") > 0)
+            .then(pl.col("n_cancela_real_prestador") / pl.col("n_citas_total"))
+            .otherwise(None)
+            .alias("tasa_cancela_real_prestador")
         )
     )

@@ -159,6 +159,12 @@ def build_empresa_features() -> pl.LazyFrame:
         Empresas con tasa alta son un factor de riesgo en la asignación:
         el prestador más adecuado puede ser penalizado por cancelaciones
         que no son de su responsabilidad.
+
+    FLAG_EMPRESA_ACTIVA
+        True si ESTADO_EMPRESA != "RETIRADO".
+        Confirmado en Q&A 2026-04-11: "Retirado = desafiliado; todo lo demás
+        es afiliado (En mora = cobertura vigente con deuda)."
+        Las empresas retiradas no deben ser objetivo del modelo de asignación.
     """
     oc   = _demanda_oc()
     tp   = _ejecucion_tp()
@@ -195,9 +201,13 @@ def build_empresa_features() -> pl.LazyFrame:
             .alias("tasa_cancela_como_cliente"),
         ])
         # ── Flags ─────────────────────────────────────────────────────────────
-        .with_columns(
+        # FLAG_EMPRESA_ACTIVA: confirmado en Q&A 2026-04-11.
+        # "Retirado significa desafiliado. Todo lo demás es afiliado."
+        # "En mora" = en cobertura, debe plata → se considera activa para efectos del modelo.
+        .with_columns([
             pl.col("n_oc_historicas").is_null().alias("FLAG_SIN_DEMANDA_HISTORICA"),
-        )
+            (pl.col("ESTADO_EMPRESA") != "RETIRADO").alias("FLAG_EMPRESA_ACTIVA"),
+        ])
         # ── Orden de columnas: identificación → perfil → demanda → flags ─────
         .select([
             # Identificación
@@ -251,5 +261,6 @@ def build_empresa_features() -> pl.LazyFrame:
 
             # Flags
             "FLAG_SIN_DEMANDA_HISTORICA",
+            "FLAG_EMPRESA_ACTIVA",
         ])
     )

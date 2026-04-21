@@ -32,11 +32,17 @@ def build_prestador_features() -> pl.LazyFrame:
                             efectivamente en 2025. null si capacidad == 0 o
                             sin actividad. Objetivo: entre 0.70 y 0.90
                             (ver DIAGNOSTICO_ANALISIS.md §5.4).
-    FLAG_SIN_ACTIVIDAD_2025 True si el prestador no tiene citas de campo en 2025.
-                            Cubre dos casos: (a) nunca apareció en Tareas_Programadas
-                            (n_citas_total null) y (b) apareció solo con registros
-                            INFORME, sin ninguna visita presencial (n_citas_total == 0).
-                            Permite excluirlos del clustering o tratarlos como grupo separado.
+    FLAG_SIN_ACTIVIDAD_2025 True si el prestador no tiene ningún registro en
+                            Tareas_Programadas (n_citas_total null). Son prestadores
+                            del catálogo que no aparecieron en el sistema operativo 2025.
+                            Se excluyen del clustering por falta total de datos de desempeño.
+    FLAG_SOLO_VIRTUAL_2025  True si el prestador aparece en Tareas_Programadas pero
+                            únicamente con registros de tipo INFORME, sin ninguna visita
+                            de campo (n_citas_total == 0). Confirmado en Q&A 2026-04-11:
+                            la ruta LIVIANA usa prestadores virtuales que orientan a
+                            clientes por mensajes/llamadas sin visita presencial.
+                            Estos prestadores SÍ son activos — se incluyen en clustering
+                            y forman su propio segmento por métricas de informe.
     """
     perfil = build_perfil_features()
     performance = build_performance_features()
@@ -68,15 +74,17 @@ def build_prestador_features() -> pl.LazyFrame:
             .otherwise(None)
             .alias("utilizacion_capacidad")
         )
-        # ── Flag de actividad ────────────────────────────────────────────────
-        # null → prestador sin fila en Tareas_Programadas (nunca apareció).
-        # 0   → prestador con programaciones pero todas de tipo INFORME (cero
-        #       visitas de campo). Ambos casos quedan excluidos del clustering.
-        # Verificado: 318 prestadores tienen n_citas_total == 0 en los datos.
-        .with_columns(
-            (pl.col("n_citas_total").is_null() | (pl.col("n_citas_total") == 0))
-            .alias("FLAG_SIN_ACTIVIDAD_2025")
-        )
+        # ── Flags de actividad ───────────────────────────────────────────────
+        # FLAG_SIN_ACTIVIDAD_2025: null → prestador sin ningún registro en TP.
+        #   Sin datos de desempeño → se excluye del clustering.
+        # FLAG_SOLO_VIRTUAL_2025: n_citas_total == 0 → tiene programaciones INFORME
+        #   pero cero visitas de campo. Son prestadores del canal virtual (ruta LIVIANA).
+        #   Confirmado en Q&A 2026-04-11. Se incluyen en clustering (métricas de informe).
+        # Verificado: ~225 prestadores tienen n_citas_total null; 318 tienen n_citas_total == 0.
+        .with_columns([
+            pl.col("n_citas_total").is_null().alias("FLAG_SIN_ACTIVIDAD_2025"),
+            (pl.col("n_citas_total") == 0).alias("FLAG_SOLO_VIRTUAL_2025"),
+        ])
         # ── Orden de columnas: identificación → perfil → desempeño → flags ──
         .select([
             # Identificación
@@ -123,16 +131,24 @@ def build_prestador_features() -> pl.LazyFrame:
             "n_citas_canceladas",
             "n_cancela_empresa",
             "n_cancela_prestador",
+            "n_cancela_sin_motivo",
+            "n_cancela_real_prestador",
             "tasa_ejecucion",
             "tasa_cancelacion",
             "tasa_cancela_empresa",
             "tasa_cancela_prestador",
+            "tasa_cancela_real_prestador",
             "duracion_promedio_ejecutada",
             "duracion_total_ejecutada",
             "n_duracion_nula_ejecutadas",
             "n_empresas_atendidas",
             "n_tareas_distintas_ejecutadas",
             "n_municipios_destino",
+
+            # Perfil de demanda realmente atendida (2025)
+            "sector_principal_atendido",
+            "segmento_principal_atendido",
+            "pct_empresa_compleja",
 
             # Informes (citas 2025)
             "n_informes_enviados",
@@ -157,5 +173,6 @@ def build_prestador_features() -> pl.LazyFrame:
 
             # Flags
             "FLAG_SIN_ACTIVIDAD_2025",
+            "FLAG_SOLO_VIRTUAL_2025",
         ])
     )
