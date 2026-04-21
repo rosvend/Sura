@@ -17,7 +17,7 @@ import datetime
 
 import polars as pl
 
-from src.silver.extract import load_tareas_prestador
+from src.silver.extract import load_tareas_prestador, load_maestro
 
 # Fecha de corte para calcular antigüedad (hoy según contexto del proyecto)
 _FECHA_CORTE = datetime.date(2026, 4, 8)
@@ -139,40 +139,132 @@ def _bloque_principal() -> pl.LazyFrame:
     return bloque_top
 
 
+def _maestro_enrichment() -> pl.LazyFrame:
+    """Enriquecimiento del perfil técnico de cada prestador con metadatos del Maestro.
+
+    Relaciona las tareas habilitadas del catálogo de prestadores con la información
+    del Maestro para saber qué fracción del portfolio del asesor corresponde al
+    nuevo modelo de atención y qué fracción es de etapa operativa (TRA).
+
+    Proceso:
+    1. Agrupa el Maestro a nivel tarea (cdtarea) para evitar conteo múltiple
+       por combinaciones clasificación × producto.
+    2. Obtiene pares únicos (DNI_PRESTADOR, CDTAREA) del catálogo (deduplica
+       la dimensión bloque × municipio para no inflar las proporciones).
+    3. Join left con el lookup de tareas y agrega por prestador.
+    """
+    # Lookup: una fila por cdtarea con flags del Maestro
+    maestro_por_tarea = (
+        load_maestro()
+        .group_by("cdtarea")
+        .agg([
+            pl.col("snnuevo_modelo").fill_null(False).any().alias("es_nuevo_modelo"),
+            pl.col("FLAG_TAREA_ACTIVA").any().alias("es_activa_maestro"),
+            (pl.col("cdetapa_gestion") == "TRA").any().alias("es_tratamiento"),
+        ])
+    )
+
+    # Pares únicos prestador-tarea para evitar peso artificial de bloques y municipios
+    tareas_prestador_unicas = (
+        load_tareas_prestador()
+        .select(["DNI_PRESTADOR", "CDTAREA"])
+        .unique()
+    )
+
+    return (
+        tareas_prestador_unicas
+        .join(maestro_por_tarea, left_on="CDTAREA", right_on="cdtarea", how="left")
+        .group_by("DNI_PRESTADOR")
+        .agg([
+            pl.col("es_nuevo_modelo").fill_null(False).mean().alias("pct_tareas_nuevo_modelo"),
+            pl.col("es_tratamiento").fill_null(False).mean().alias("pct_tareas_tratamiento"),
+            # Cuántas tareas del prestador están activas en el Maestro oficial.
+            # null en es_activa_maestro significa que la tarea no existe en el Maestro
+            # (tarea habilitada pero no en el catálogo vigente).
+            pl.col("es_activa_maestro").fill_null(False).sum().cast(pl.Int32).alias("n_tareas_con_maestro"),
+        ])
+    )
+
+
+def _etapa_predominante() -> pl.LazyFrame:
+    """Etapa de gestión más frecuente en el portfolio de tareas del prestador.
+
+    Patrón sort-and-take (igual que _clasificacion_predominante): contar por
+    (prestador, etapa) → ordenar descendente → tomar el primero por prestador.
+
+    cdetapa_gestion: TRA, IDE, MON, PRI, EVA, NA — indica en qué fase del
+    ciclo de atención se concentra el trabajo del asesor.
+    """
+    # Lookup: una fila por cdtarea con su etapa de gestión.
+    # Las tareas son consistentes en etapa; se toma el primer valor no nulo.
+    etapa_por_tarea = (
+        load_maestro()
+        .group_by("cdtarea")
+        .agg(
+            pl.col("cdetapa_gestion").drop_nulls().first().alias("cdetapa_gestion")
+        )
+    )
+
+    tareas_prestador_unicas = (
+        load_tareas_prestador()
+        .select(["DNI_PRESTADOR", "CDTAREA"])
+        .unique()
+    )
+
+    return (
+        tareas_prestador_unicas
+        .join(etapa_por_tarea, left_on="CDTAREA", right_on="cdtarea", how="left")
+        .filter(pl.col("cdetapa_gestion").is_not_null())
+        .group_by(["DNI_PRESTADOR", "cdetapa_gestion"])
+        .agg(pl.len().alias("_cnt"))
+        .sort("_cnt", descending=True)
+        .group_by("DNI_PRESTADOR")
+        .agg(pl.col("cdetapa_gestion").first().alias("etapa_predominante"))
+    )
+
+
 # ── API pública ──────────────────────────────────────────────────────────────
 
 def build_perfil_features() -> pl.LazyFrame:
     """Tabla Gold de perfil técnico declarado por DNI_PRESTADOR.
 
-    Combina las tres sub-agregaciones y calcula el índice de especialización
-    final. Cubre todos los prestadores del catálogo, incluidos los que no
-    tienen actividad en 2025 (a diferencia de feat_prestador_performance, que
-    solo incluye prestadores con citas programadas ese año).
+    Combina las sub-agregaciones del catálogo de prestadores con el enriquecimiento
+    del Maestro oficial de servicios de prevención. Cubre todos los prestadores del
+    catálogo, incluidos los que no tienen actividad en 2025 (a diferencia de
+    feat_prestador_performance, que solo incluye prestadores con citas programadas).
 
     Columnas clave de salida
     ─────────────────────────
-    n_habilitaciones         filas en catálogo = combinaciones (tarea × bloque)
-    n_tareas_distintas       tareas únicas habilitadas
-    n_bloques_distintos      bloques temáticos con al menos una tarea
-    n_productos_distintos    productos/programas cubiertos
+    n_habilitaciones            filas en catálogo = combinaciones (tarea × bloque)
+    n_tareas_distintas          tareas únicas habilitadas
+    n_bloques_distintos         bloques temáticos con al menos una tarea
+    n_productos_distintos       productos/programas cubiertos
     clasificacion_predominante  tipo de servicio más frecuente en el catálogo
-    bloque_principal         bloque con más tareas habilitadas
-    indice_especializacion   n_tareas_bloque_principal / n_tareas_distintas
-                             → 1.0 = especialista puro; ~0 = generalista
-    capacidad                horas disponibles declaradas para el periodo
-    sin_capacidad            True si CAPACIDAD == 0
-    n_municipios_cobertura   municipios de base distintos en el catálogo
-    n_redes                  cuántas redes regionales incluyen al prestador
-    antiguedad_dias          días desde FEALTA_PRESTADOR hasta fecha de corte
+    bloque_principal            bloque con más tareas habilitadas
+    indice_especializacion      n_tareas_bloque_principal / n_tareas_distintas
+                                → 1.0 = especialista puro; ~0 = generalista
+    capacidad                   horas disponibles declaradas para el periodo
+    sin_capacidad               True si CAPACIDAD == 0
+    n_municipios_cobertura      municipios de base distintos en el catálogo
+    n_redes                     cuántas redes regionales incluyen al prestador
+    antiguedad_dias             días desde FEALTA_PRESTADOR hasta fecha de corte
+    pct_tareas_nuevo_modelo     fracción de tareas del nuevo modelo de atención
+    pct_tareas_tratamiento      fracción de tareas en etapa operativa (TRA)
+    n_tareas_con_maestro        tareas del prestador activas en el Maestro oficial
+    etapa_predominante          etapa de gestión más frecuente en su portfolio (contexto)
     """
     base = _perfil_base()
     clasificacion = _clasificacion_predominante()
     bloque = _bloque_principal()
+    maestro = _maestro_enrichment()
+    etapa = _etapa_predominante()
 
     return (
         base
         .join(clasificacion, on="DNI_PRESTADOR", how="left")
         .join(bloque, on="DNI_PRESTADOR", how="left")
+        .join(maestro, on="DNI_PRESTADOR", how="left")
+        .join(etapa, on="DNI_PRESTADOR", how="left")
         # Índice de especialización: requiere n_tareas_distintas (de base)
         # y n_tareas_bloque_principal (de bloque_top)
         .with_columns(

@@ -45,6 +45,8 @@ FEATURE_COLS: list[str] = [
     "n_bloques_distintos",
     "indice_especializacion",
     "tipo_perfil_ord",        # ordinal derivado de DSTIPO_PERFIL
+    "pct_tareas_nuevo_modelo",  # fracción de tareas del nuevo modelo de atención
+    "pct_tareas_tratamiento",   # fracción de tareas en etapa operativa (TRA)
 
     # Dimensión geográfica
     "n_municipios_cobertura",
@@ -140,6 +142,8 @@ def _imputar_nulos(df: pl.LazyFrame) -> pl.LazyFrame:
         "n_municipios_destino",
         "ratio_cobertura_real",      # null si sin destinos registrados o sin catálogo geográfico
         "es_red_estrategica",
+        "pct_tareas_nuevo_modelo",   # null = ninguna tarea del prestador está en el Maestro → 0
+        "pct_tareas_tratamiento",    # null = ninguna tarea del prestador está en el Maestro → 0
     ]
 
     # Features que se imputan con la mediana (valor típico del grupo)
@@ -167,16 +171,21 @@ def build_clustering_input() -> pl.LazyFrame:
     """Matriz de features lista para sklearn.cluster.KMeans.
 
     Proceso:
-      1. Carga feat_prestador (perfil + desempeño, 56 cols)
+      1. Carga feat_prestador (perfil + desempeño + Maestro)
       2. Excluye prestadores sin ningún registro en TP (FLAG_SIN_ACTIVIDAD_2025=True).
          Los prestadores virtuales (FLAG_SOLO_VIRTUAL_2025=True) sí se incluyen.
       3. Codifica tipo_perfil → ordinal; es_red_estrategica (booleano pre-computado) → Float64
       4. Imputa nulos residuales
       5. Selecciona DNI_PRESTADOR + FEATURE_COLS + columnas de contexto
 
+    Columnas Maestro en FEATURE_COLS:
+        pct_tareas_nuevo_modelo     fracción de tareas del nuevo modelo de atención
+        pct_tareas_tratamiento      fracción de tareas en etapa operativa (TRA)
+
     Columnas de contexto (no entran al modelo, útiles para labeling):
         bloque_principal, clasificacion_predominante, tipo_perfil,
-        tipo_red, municipio_base, dsoficina
+        tipo_red, municipio_base, dsoficina,
+        etapa_predominante, n_tareas_con_maestro
 
     La normalización (StandardScaler) ocurre en el notebook:
         X = df[FEATURE_COLS].to_numpy()
@@ -217,5 +226,11 @@ def build_clustering_input() -> pl.LazyFrame:
             # pero son esenciales para nombrar y validar los clusters.
             "sector_principal_atendido",
             "segmento_principal_atendido",
+
+            # Contexto Maestro (no entran al modelo: ordinal/cardinalidad baja
+            # para etapa, y n_tareas_con_maestro es una magnitud absoluta que
+            # correlaciona con n_tareas_distintas ya en el modelo).
+            "etapa_predominante",
+            "n_tareas_con_maestro",
         ])
     )

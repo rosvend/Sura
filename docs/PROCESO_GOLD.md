@@ -449,6 +449,7 @@ Los siguientes supuestos fueron necesarios para construir Gold. La columna **Est
 | 5   | `FECHA_INGRESO` registra la fecha de incorporación real a la red                  | `antiguedad_dias`                                | Q21      | ⚠️ No preguntado — pendiente |
 | 6   | Los prestadores con `FLAG_SIN_ACTIVIDAD_2025` son inactivos (no capacidad ociosa) | Decisión de exclusión del clustering             | Q22      | ⚠️ No preguntado — pendiente |
 | 7   | `PERFIL_TARIFA` (A,B,E,I,O,P,T,X) es nominal sin jerarquía                        | No incluida en features actualmente              | Q23      | ⚠️ No preguntado — bajo riesgo |
+| 8   | `snnuevo_modelo = S` en Maestro indica tareas con distinción operativa real        | `pct_tareas_nuevo_modelo`                        | —        | ⚠️ Semántica desconocida — preguntar en próximo encuentro. Si es solo un flag de migración de sistema sin impacto operativo, eliminar de `FEATURE_COLS`. |
 
 ---
 

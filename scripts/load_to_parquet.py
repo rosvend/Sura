@@ -7,6 +7,7 @@ files = {
     "gs://sura-clustering-raw/Detalle_Empresa.txt": "gs://sura-clustering-raw/Detalle_Empresa.parquet",
     "gs://sura-clustering-raw/Tareas_Programadas_canceladas_2025.txt": "gs://sura-clustering-raw/Tareas_Programadas_canceladas_2025.parquet",
     "gs://sura-clustering-raw/Tareas_prestador_bloque.xlsx": "gs://sura-clustering-raw/Tareas_prestador_bloque.parquet",
+    "gs://sura-clustering-raw/Maestro.xlsx": "gs://sura-clustering-raw/Maestro.parquet",
 }
 
 fs = gcsfs.GCSFileSystem()

@@ -92,6 +92,11 @@ _ORD_BOOL_COLS = [
     "Ind_Compensacion",
 ]
 
+# ── Maestro de Productos y Tareas: grupos de columnas ────────────────────
+
+_MAESTRO_BOOL_COLS = ["snrequiereinforme", "sninforme_obligatorio", "snnuevo_modelo"]
+_MAESTRO_DATE_COLS = ["fealta", "febaja"]
+
 
 def load_ordenado() -> pl.LazyFrame:
     """Órdenes de compra (Silver, limpio).
@@ -382,5 +387,62 @@ def _clean_tareas_prestador(df: pl.LazyFrame) -> pl.LazyFrame:
         #    filtrarlos en análisis posteriores.
         .with_columns(
             (pl.col("CAPACIDAD") == 0.0).alias("FLAG_CAPACIDAD_CERO")
+        )
+    )
+
+
+def load_maestro() -> pl.LazyFrame:
+    """Catálogo oficial de servicios de prevención habilitados (Silver, limpio).
+
+    Fuente: Maestro.xlsx — una sola hoja ("Hoja1"), 9,112 filas.
+
+    Transformaciones aplicadas:
+    - Strings: espacios extra eliminados, cadenas vacías a null
+    - Fechas ('YYYY-MM-DD HH:MM:SS') a Date (fealta, febaja)
+    - Booleanos S/N a Boolean (snrequiereinforme, sninforme_obligatorio, snnuevo_modelo)
+    - FLAG_TAREA_ACTIVA: True si febaja es null (tarea vigente), False si tiene fecha de baja
+
+    Nota sobre el grano: la misma cdtarea puede aparecer en múltiples filas con
+    distintas combinaciones de cdproducto y cdclasificacion. El grano natural
+    más cercano es (cdproducto, cdtarea, cdclasificacion). Usar group_by(cdtarea)
+    antes de joins para evitar duplicar registros de prestadores.
+    """
+    return _clean_maestro(
+        pl.scan_parquet(PARQUET_FILES["maestro"])
+    )
+
+
+def _clean_maestro(df: pl.LazyFrame) -> pl.LazyFrame:
+    """Limpieza Silver para Maestro de Productos y Tareas."""
+    return (
+        df
+        # 1. Normalizar strings: quitar espacios extremos y convertir vacíos a null
+        .with_columns(
+            pl.when(pl.col(pl.String).str.strip_chars() == "")
+            .then(None)
+            .otherwise(pl.col(pl.String).str.strip_chars())
+            .name.keep()
+        )
+        # 2. Fechas formato 'YYYY-MM-DD HH:MM:SS' a solo Date.
+        #    Se extrae solo la parte de fecha (primeros 10 chars) para uniformidad
+        #    con el resto del pipeline; la hora no aporta valor analítico.
+        .with_columns([
+            pl.col(col)
+            .str.slice(0, 10)
+            .str.to_date(format="%Y-%m-%d", strict=False)
+            .alias(col)
+            for col in _MAESTRO_DATE_COLS
+        ])
+        # 3. Booleanos S/N a Boolean.
+        #    (pl.col(col) == "S") preserva null cuando el input es null,
+        #    que es el comportamiento correcto para los ~36% nulos de estos campos.
+        .with_columns([
+            (pl.col(col) == "S").alias(col)
+            for col in _MAESTRO_BOOL_COLS
+        ])
+        # 4. Flag de vigencia: febaja null = tarea activa en el catálogo.
+        #    7,040 activas vs 2,072 inactivas (febaja con fecha).
+        .with_columns(
+            pl.col("febaja").is_null().alias("FLAG_TAREA_ACTIVA")
         )
     )
