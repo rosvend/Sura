@@ -88,7 +88,7 @@ class HDBSCANResult:
 def _load_matrix() -> tuple[pl.DataFrame, np.ndarray]:
     """Materializa el LazyFrame y devuelve (df_completo, X numpy)."""
     df = build_clustering_input().collect()
-    df = df.with_columns(pl.col(FEATURE_COLS).fill_null(0).fill_nan())
+    df = df.with_columns(pl.col(FEATURE_COLS).fill_null(0).fill_nan(0))
     X = df.select(FEATURE_COLS).to_numpy() 
     return df, X
 
