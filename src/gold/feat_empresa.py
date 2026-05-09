@@ -16,6 +16,8 @@ Uso:
 
 import polars as pl
 
+from src.config import GOLD_PARQUETS
+from src.gold._persistence import read_or_build
 from src.silver.extract import load_empresas, load_ordenado, load_tareas_programadas
 
 # ── Constantes de dominio ────────────────────────────────────────────────────
@@ -136,8 +138,11 @@ def _ejecucion_tp() -> pl.LazyFrame:
 
 # ── API pública ──────────────────────────────────────────────────────────────
 
-def build_empresa_features() -> pl.LazyFrame:
+def build_empresa_features(force_rebuild: bool = False) -> pl.LazyFrame:
     """Tabla Gold de features de demanda por Empresa_Id.
+
+    Por defecto lee de GOLD_PARQUETS["feat_empresa"]. Pasa force_rebuild=True
+    para recomputar (caro: join sobre 2.175M empresas × 1.5M citas).
 
     Estrategia de join: left join desde Detalle_Empresa (catálogo maestro,
     2.175M empresas) hacia OC y citas 2025. Empresas sin actividad histórica
@@ -166,6 +171,14 @@ def build_empresa_features() -> pl.LazyFrame:
         es afiliado (En mora = cobertura vigente con deuda)."
         Las empresas retiradas no deben ser objetivo del modelo de asignación.
     """
+    return read_or_build(
+        uri=GOLD_PARQUETS["feat_empresa"],
+        build_fn=_compute_empresa_features,
+        force_rebuild=force_rebuild,
+    )
+
+
+def _compute_empresa_features() -> pl.LazyFrame:
     oc   = _demanda_oc()
     tp   = _ejecucion_tp()
 

@@ -13,11 +13,13 @@ Uso:
 
 import polars as pl
 
+from src.config import GOLD_PARQUETS
+from src.gold._persistence import read_or_build
 from src.gold.feat_prestador_performance import build_performance_features
 from src.gold.feat_prestador_perfil import build_perfil_features
 
 
-def build_prestador_features() -> pl.LazyFrame:
+def build_prestador_features(force_rebuild: bool = False) -> pl.LazyFrame:
     """Tabla Gold maestra por DNI_PRESTADOR.
 
     Estrategia de join: left join desde el perfil (catálogo) hacia el
@@ -43,7 +45,18 @@ def build_prestador_features() -> pl.LazyFrame:
                             clientes por mensajes/llamadas sin visita presencial.
                             Estos prestadores SÍ son activos — se incluyen en clustering
                             y forman su propio segmento por métricas de informe.
+
+    Por defecto lee de GOLD_PARQUETS["feat_prestador"]. Pasa force_rebuild=True
+    para recomputar (caro: joins sobre 1.5M filas). Hacerlo una vez en Vertex AI.
     """
+    return read_or_build(
+        uri=GOLD_PARQUETS["feat_prestador"],
+        build_fn=_compute_prestador_features,
+        force_rebuild=force_rebuild,
+    )
+
+
+def _compute_prestador_features() -> pl.LazyFrame:
     perfil = build_perfil_features()
     performance = build_performance_features()
 
@@ -106,6 +119,12 @@ def build_prestador_features() -> pl.LazyFrame:
             "cdbloque_principal",
             "n_tareas_bloque_principal",
             "indice_especializacion",
+
+            # Enriquecimiento Maestro (catálogo oficial de servicios)
+            "pct_tareas_nuevo_modelo",
+            "pct_tareas_tratamiento",
+            "n_tareas_con_maestro",
+            "etapa_predominante",
 
             # Red y geografía (catálogo)
             "tipo_red",

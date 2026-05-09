@@ -18,6 +18,8 @@ Uso:
 
 import polars as pl
 
+from src.config import GOLD_PARQUETS
+from src.gold._persistence import read_or_build
 from src.gold.feat_prestador import build_prestador_features
 
 # ── Encoding ordinal de tipo_perfil ──────────────────────────────────────────
@@ -167,10 +169,13 @@ def _imputar_nulos(df: pl.LazyFrame) -> pl.LazyFrame:
 
 # ── API pública ──────────────────────────────────────────────────────────────
 
-def build_clustering_input() -> pl.LazyFrame:
+def build_clustering_input(force_rebuild: bool = False) -> pl.LazyFrame:
     """Matriz de features lista para sklearn.cluster.KMeans.
 
-    Proceso:
+    Por defecto, lee la versión materializada en GOLD_PARQUETS["clustering_input"].
+    Si el archivo no existe o force_rebuild=True, recomputa desde Silver.
+
+    Proceso (cuando se recomputa):
       1. Carga feat_prestador (perfil + desempeño + Maestro)
       2. Excluye prestadores sin ningún registro en TP (FLAG_SIN_ACTIVIDAD_2025=True).
          Los prestadores virtuales (FLAG_SOLO_VIRTUAL_2025=True) sí se incluyen.
@@ -191,8 +196,16 @@ def build_clustering_input() -> pl.LazyFrame:
         X = df[FEATURE_COLS].to_numpy()
         X_scaled = StandardScaler().fit_transform(X)
     """
+    return read_or_build(
+        uri=GOLD_PARQUETS["clustering_input"],
+        build_fn=lambda: _compute_clustering_input(force_rebuild=force_rebuild),
+        force_rebuild=force_rebuild,
+    )
+
+
+def _compute_clustering_input(force_rebuild: bool = False) -> pl.LazyFrame:
     return (
-        build_prestador_features()
+        build_prestador_features(force_rebuild=force_rebuild)
         # Excluye solo los prestadores sin ningún registro en Tareas_Programadas
         # (FLAG_SIN_ACTIVIDAD_2025). Sin datos de desempeño, la imputación masiva
         # distorsionaría los centroides.

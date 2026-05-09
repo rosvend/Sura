@@ -23,3 +23,19 @@ PARQUET_FILES = {
     "maestro":           f"{GCS_BUCKET}/Maestro.parquet",
 }
 
+# ── Gold: tablas materializadas (resultado de feature engineering) ───────────
+# Persistir aquí evita re-correr Bronze→Silver→Gold (joins de 1.5M × 2.1M filas)
+# en cada invocación. La bake corre una sola vez en Vertex AI; los notebooks,
+# scripts y la app Streamlit leen de aquí en milisegundos.
+GOLD_PARQUETS = {
+    "clustering_input": f"{GCS_BUCKET}/gold/clustering_input.parquet",
+    "feat_prestador":   f"{GCS_BUCKET}/gold/feat_prestador.parquet",
+    "feat_empresa":     f"{GCS_BUCKET}/gold/feat_empresa.parquet",
+}
+
+# ── Artefactos del modelo de clustering (Día 1) ──────────────────────────────
+# Persistidos en GCS para sobrevivir el shutdown del runtime de Colab Enterprise
+# y permitir que la laptop (Días 2–6) los lea sin recomputar.
+MODELS_DIR_GCS   = f"{GCS_BUCKET}/models"
+CLUSTERS_PARQUET = f"{GCS_BUCKET}/data/processed/prestador_clusters.parquet"
+
