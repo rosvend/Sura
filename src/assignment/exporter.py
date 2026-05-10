@@ -62,23 +62,23 @@ from src.assignment.score import (
 )
 
 
-def _build_candidate_pool() -> pl.DataFrame:
-    """Construye una fila por (DNI_PRESTADOR, CDTAREA) con lista de municipios
-    y todas las features de scoring pre-joinadas.
+def _build_candidate_pool() -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Devuelve (pool_tarea, muni_lookup).
+
+    pool_tarea: una fila por (CDTAREA, DNI_PRESTADOR) con TODAS las features
+    de scoring. Sin list-columns de municipios (esas viven en muni_lookup).
+
+    muni_lookup: una fila por (CDTAREA, DNI_PRESTADOR, CDMUNICIPIO) — tabla
+    plana usada con un hash-join semi para detectar match exacto de municipio
+    y match de departamento. Mucho más eficiente que `list.contains` cuando
+    se cruza con 500K órdenes.
     """
     catalog = (
         load_tareas_prestador()
-        .select(["DNI_PRESTADOR", "CDTAREA", "CDMUNICIPIO", "CAPACIDAD", "DSTIPO_PERFIL"])
+        .select(["DNI_PRESTADOR", "CDTAREA", "CDMUNICIPIO", "CAPACIDAD"])
+        .drop_nulls(["DNI_PRESTADOR", "CDTAREA", "CDMUNICIPIO"])
+        .unique()
         .collect()
-    )
-    cand = (
-        catalog
-        .group_by(["CDTAREA", "DNI_PRESTADOR"])
-        .agg([
-            pl.col("CDMUNICIPIO").unique().alias("munis"),
-            pl.col("CDMUNICIPIO").str.slice(0, 2).unique().alias("deptos"),
-            pl.col("CAPACIDAD").max().alias("capacidad_catalog"),
-        ])
     )
     prestador = (
         build_prestador_features()
@@ -98,11 +98,14 @@ def _build_candidate_pool() -> pl.DataFrame:
     )
     clusters = pl.read_parquet(CLUSTERS_PARQUET).select(["DNI_PRESTADOR", "cluster_id"])
 
-    pool = (
-        cand
-        .join(prestador,   on="DNI_PRESTADOR", how="left")
-        .join(ord_map,     on="DNI_PRESTADOR", how="left")
-        .join(clusters,    on="DNI_PRESTADOR", how="left")
+    # Pool por tarea (sin municipios)
+    pool_tarea = (
+        catalog
+        .group_by(["CDTAREA", "DNI_PRESTADOR"])
+        .agg(pl.col("CAPACIDAD").max().alias("capacidad_catalog"))
+        .join(prestador, on="DNI_PRESTADOR", how="left")
+        .join(ord_map,   on="DNI_PRESTADOR", how="left")
+        .join(clusters,  on="DNI_PRESTADOR", how="left")
         .filter(
             pl.col("cluster_id").is_not_null()
             & (pl.col("cluster_id") != -1)
@@ -110,9 +113,39 @@ def _build_candidate_pool() -> pl.DataFrame:
             & (pl.col("utilizacion_capacidad").fill_null(0.0) <= 1.5)
         )
     )
-    print(f"[exporter] candidate pool: {pool.height:,} rows ({pool['CDTAREA'].n_unique()} tareas, "
-          f"{pool['DNI_PRESTADOR'].n_unique()} prestadores)")
-    return pool
+    # Pre-anotar scores que no dependen de la orden (specialization base y performance)
+    pool_tarea = pool_tarea.with_columns(
+        pl.col("tipo_perfil_ord").fill_null(3.0).alias("_perfil_ord"),
+        (
+            (
+                pl.col("tasa_ejecucion").fill_null(0.5)
+                + pl.col("tasa_aprobacion_informe").fill_null(0.5)
+                + (1.0 - pl.col("tasa_cancela_real_prestador").fill_null(0.5))
+            ) / 3.0
+        ).clip(0.0, 1.0).alias("score_performance"),
+        pl.when(pl.col("utilizacion_capacidad").is_null())
+        .then(pl.lit(0.5))
+        .otherwise(
+            pl.max_horizontal(
+                pl.lit(0.0),
+                pl.lit(1.0) - 1.3 * (pl.col("utilizacion_capacidad") - 0.7).abs(),
+            )
+        )
+        .alias("score_capacity"),
+    )
+
+    # Lookup tabla plana: una fila por (tarea, prestador, municipio).
+    # Pequeña — restringida a las parejas que sobrevivieron los hard filters.
+    valid_pairs = pool_tarea.select(["CDTAREA", "DNI_PRESTADOR"])
+    muni_lookup = (
+        catalog
+        .join(valid_pairs, on=["CDTAREA", "DNI_PRESTADOR"], how="inner")
+        .select(["CDTAREA", "DNI_PRESTADOR", "CDMUNICIPIO"])
+    )
+
+    print(f"[exporter] pool_tarea: {pool_tarea.height:,} (CDTAREA × DNI_PRESTADOR) pairs")
+    print(f"[exporter] muni_lookup: {muni_lookup.height:,} (CDTAREA × DNI_PRESTADOR × CDMUNICIPIO) rows")
+    return pool_tarea, muni_lookup
 
 
 def _load_orders(limit: int | None) -> pl.DataFrame:
@@ -139,20 +172,27 @@ def _load_orders(limit: int | None) -> pl.DataFrame:
     return orders
 
 
-def _score_batch(orders: pl.DataFrame, pool: pl.DataFrame) -> pl.DataFrame:
-    """Vectorización del scoring para todas las (empresa, tarea, muni) en `orders`."""
-    # Cross join por tarea — explota a ~N × ~30 filas
-    joined = orders.join(
-        pool,
-        left_on="Codigo_Tarea",
-        right_on="CDTAREA",
-        how="inner",
-    )
-    if joined.is_empty():
-        return joined
+def _score_chunk(
+    orders: pl.DataFrame,
+    pool_tarea: pl.DataFrame,
+    muni_lookup: pl.DataFrame,
+    archetype_df: pl.DataFrame,
+) -> pl.DataFrame:
+    """Scoring vectorizado para un chunk de órdenes.
 
-    # Clasificación de segmento (case-insensitive, tolerante a vocabularios).
-    joined = joined.with_columns(
+    Pasos:
+      1. Clasificación de segmento (is_complex / is_virtual_seg) ANTES del join
+         para reducir tamaño.
+      2. Inner-join orders × pool_tarea (sin list columns) en CDTAREA.
+      3. Hard filter LIVIANA → cluster_id == 3.
+      4. Hash-semi-join contra muni_lookup para `has_muni_match` (exacto)
+         y `has_depto_match` (prefijo 2 chars).
+      5. Combinación de scores y rank top-10.
+    """
+    if orders.is_empty():
+        return pl.DataFrame()
+
+    o = orders.with_columns(
         pl.col("Macrosegmentacion_Desc").fill_null("").str.to_uppercase().alias("_seg_up")
     ).with_columns([
         (
@@ -165,70 +205,64 @@ def _score_batch(orders: pl.DataFrame, pool: pl.DataFrame) -> pl.DataFrame:
             | pl.col("_seg_up").str.contains("MICRO")
             | pl.col("_seg_up").str.contains("EMPRESA NUEVA")
         ).alias("is_virtual_seg"),
-    ])
+        pl.col("cd_municipio_destino").str.slice(0, 2).alias("_target_depto"),
+    ]).drop("_seg_up")
 
-    # Hard filter: LIVIANA → solo cluster 3 (Q&A 2026-04-11). Otras rutas no
-    # excluyen cluster 3 (ver auditoría 2026-05-09: exclusión sobre-restrictiva).
+    joined = o.join(pool_tarea, left_on="Codigo_Tarea", right_on="CDTAREA", how="inner")
+    if joined.is_empty():
+        return pl.DataFrame()
+
+    # Hard filter cluster gating.
     joined = joined.filter(
         ~pl.col("is_virtual_seg") | (pl.col("cluster_id") == CLUSTER_VIRTUAL)
     )
+    if joined.is_empty():
+        return pl.DataFrame()
 
-    # Geo flags
+    # Hash-semi-join para has_muni_match: existe (Codigo_Tarea, DNI_PRESTADOR, CDMUNICIPIO)
+    # exacto en muni_lookup.
+    muni_match = joined.join(
+        muni_lookup.rename({"CDTAREA": "Codigo_Tarea", "CDMUNICIPIO": "cd_municipio_destino"}),
+        on=["Codigo_Tarea", "DNI_PRESTADOR", "cd_municipio_destino"],
+        how="semi",
+    ).select(["Dni_Empresa", "Codigo_Tarea", "cd_municipio_destino", "DNI_PRESTADOR"]) \
+     .with_columns(pl.lit(True).alias("has_muni_match"))
+
+    # Hash-semi-join para has_depto_match: existe (Codigo_Tarea, DNI_PRESTADOR, CDMUNICIPIO[:2])
+    muni_lookup_dep = muni_lookup.with_columns(
+        pl.col("CDMUNICIPIO").str.slice(0, 2).alias("_depto")
+    ).select(["CDTAREA", "DNI_PRESTADOR", "_depto"]).unique()
+    depto_match = joined.join(
+        muni_lookup_dep.rename({"CDTAREA": "Codigo_Tarea", "_depto": "_target_depto"}),
+        on=["Codigo_Tarea", "DNI_PRESTADOR", "_target_depto"],
+        how="semi",
+    ).select(["Dni_Empresa", "Codigo_Tarea", "cd_municipio_destino", "DNI_PRESTADOR"]) \
+     .with_columns(pl.lit(True).alias("has_depto_match"))
+
+    join_keys = ["Dni_Empresa", "Codigo_Tarea", "cd_municipio_destino", "DNI_PRESTADOR"]
+    joined = joined.join(muni_match,  on=join_keys, how="left") \
+                   .join(depto_match, on=join_keys, how="left")
     joined = joined.with_columns([
-        pl.col("munis").list.contains(pl.col("cd_municipio_destino")).alias("has_muni_match"),
-        pl.col("deptos").list.contains(
-            pl.col("cd_municipio_destino").str.slice(0, 2)
-        ).alias("has_depto_match"),
+        pl.col("has_muni_match").fill_null(False),
+        pl.col("has_depto_match").fill_null(False),
     ])
 
-    # 1. Specialization: catálogo (siempre true por inner join) + seniority match
-    joined = joined.with_columns(
-        pl.col("tipo_perfil_ord").fill_null(3.0).alias("_perfil_ord")
-    ).with_columns(
+    # Specialization (depende de is_complex × _perfil_ord) y Geo.
+    joined = joined.with_columns([
         pl.when(pl.col("is_complex"))
         .then(pl.col("_perfil_ord") >= SENIORITY_THRESHOLD_COMPLEX)
         .otherwise(pl.col("_perfil_ord") >= SENIORITY_THRESHOLD_DEFAULT)
-        .alias("_seniority_ok")
-    ).with_columns(
+        .alias("_seniority_ok"),
+    ]).with_columns([
         (
-            pl.lit(0.6)
-            + pl.when(pl.col("_seniority_ok")).then(0.4).otherwise(0.0)
-        ).alias("score_specialization")
-    )
-
-    # 2. Capacity: tent alrededor de util = 0.7
-    joined = joined.with_columns(
-        pl.when(pl.col("utilizacion_capacidad").is_null())
-        .then(pl.lit(0.5))
-        .otherwise(
-            pl.max_horizontal(
-                pl.lit(0.0),
-                pl.lit(1.0) - 1.3 * (pl.col("utilizacion_capacidad") - 0.7).abs(),
-            )
-        )
-        .alias("score_capacity")
-    )
-
-    # 3. Geo
-    joined = joined.with_columns(
+            pl.lit(0.6) + pl.when(pl.col("_seniority_ok")).then(0.4).otherwise(0.0)
+        ).alias("score_specialization"),
         pl.when(pl.col("has_muni_match")).then(pl.lit(1.0))
         .when(pl.col("has_depto_match")).then(pl.lit(0.4))
         .otherwise(pl.lit(0.0))
-        .alias("score_geo")
-    )
+        .alias("score_geo"),
+    ])
 
-    # 4. Performance: media de (exec, aprob_informe, 1-cancela)
-    joined = joined.with_columns(
-        (
-            (
-                pl.col("tasa_ejecucion").fill_null(0.5)
-                + pl.col("tasa_aprobacion_informe").fill_null(0.5)
-                + (1.0 - pl.col("tasa_cancela_real_prestador").fill_null(0.5))
-            ) / 3.0
-        ).clip(0.0, 1.0).alias("score_performance")
-    )
-
-    # Score total
     joined = joined.with_columns(
         (
             W_SPEC * pl.col("score_specialization")
@@ -238,22 +272,49 @@ def _score_batch(orders: pl.DataFrame, pool: pl.DataFrame) -> pl.DataFrame:
         ).alias("score_total")
     )
 
-    # Anotar arquetipo
-    archetype_df = pl.DataFrame({
-        "cluster_id":     list(ARCHETYPE_NAMES.keys()),
-        "archetype_name": list(ARCHETYPE_NAMES.values()),
-    }).with_columns(pl.col("cluster_id").cast(pl.Int32))
     joined = joined.with_columns(pl.col("cluster_id").cast(pl.Int32))
     joined = joined.join(archetype_df, on="cluster_id", how="left")
 
-    # Top-10 por (Dni_Empresa, Codigo_Tarea, cd_municipio_destino)
     order_keys = ["Dni_Empresa", "Codigo_Tarea", "cd_municipio_destino"]
     joined = joined.with_columns(
         pl.col("score_total").rank(method="ordinal", descending=True)
         .over(order_keys)
         .alias("rank")
     )
-    return joined.filter(pl.col("rank") <= 10)
+    # Reducir a top-10 y dropear columnas auxiliares para liberar memoria.
+    return joined.filter(pl.col("rank") <= 10).select([
+        "Dni_Empresa", "Codigo_Tarea", "cd_municipio_destino",
+        "rank", "DNI_PRESTADOR",
+        "score_total", "score_specialization", "score_capacity",
+        "score_geo", "score_performance",
+        "cluster_id", "archetype_name", "tipo_perfil",
+        "utilizacion_capacidad", "nombre_distribuidor",
+    ])
+
+
+def _score_batch_chunked(
+    orders: pl.DataFrame,
+    pool_tarea: pl.DataFrame,
+    muni_lookup: pl.DataFrame,
+    chunk_size: int,
+) -> pl.DataFrame:
+    """Itera orders en chunks de `chunk_size`, llamando a _score_chunk."""
+    archetype_df = pl.DataFrame({
+        "cluster_id":     list(ARCHETYPE_NAMES.keys()),
+        "archetype_name": list(ARCHETYPE_NAMES.values()),
+    }).with_columns(pl.col("cluster_id").cast(pl.Int32))
+
+    n = orders.height
+    parts: list[pl.DataFrame] = []
+    for start in range(0, n, chunk_size):
+        end = min(start + chunk_size, n)
+        chunk = orders.slice(start, end - start)
+        t0 = time.perf_counter()
+        out = _score_chunk(chunk, pool_tarea, muni_lookup, archetype_df)
+        parts.append(out)
+        print(f"[exporter]   chunk {start:,}–{end:,}/{n:,}  "
+              f"out_rows={out.height:,}  ({time.perf_counter() - t0:.1f}s)")
+    return pl.concat(parts) if parts else pl.DataFrame()
 
 
 def _refresh_bq(table: str, gs_uri: str) -> None:
@@ -276,34 +337,22 @@ def _refresh_bq(table: str, gs_uri: str) -> None:
     print(f"[exporter] BQ {table} refreshed in {time.perf_counter() - t0:.1f}s")
 
 
-def export(limit: int | None = None) -> dict:
+def export(limit: int | None = None, chunk_size: int = 20_000) -> dict:
     t0 = time.perf_counter()
-    pool   = _build_candidate_pool()
+    pool_tarea, muni_lookup = _build_candidate_pool()
     orders = _load_orders(limit=limit)
 
-    print("[exporter] scoring batch...")
+    print(f"[exporter] scoring batch in chunks of {chunk_size:,}...")
     t1 = time.perf_counter()
-    top10 = _score_batch(orders, pool)
+    top10 = _score_batch_chunked(orders, pool_tarea, muni_lookup, chunk_size=chunk_size)
     print(f"[exporter] scoring done in {time.perf_counter() - t1:.1f}s — "
           f"{top10.height:,} (order × prestador) rows")
 
-    recs = top10.select([
-        pl.col("Dni_Empresa").alias("dni_empresa"),
-        pl.col("Codigo_Tarea").alias("codigo_tarea"),
-        pl.col("cd_municipio_destino"),
-        pl.col("rank"),
-        pl.col("DNI_PRESTADOR").alias("dni_prestador"),
-        pl.col("score_total"),
-        pl.col("score_specialization"),
-        pl.col("score_capacity"),
-        pl.col("score_geo"),
-        pl.col("score_performance"),
-        pl.col("cluster_id"),
-        pl.col("archetype_name"),
-        pl.col("tipo_perfil"),
-        pl.col("utilizacion_capacidad"),
-        pl.col("nombre_distribuidor"),
-    ])
+    recs = top10.rename({
+        "Dni_Empresa":   "dni_empresa",
+        "Codigo_Tarea":  "codigo_tarea",
+        "DNI_PRESTADOR": "dni_prestador",
+    })
     assignments = recs.filter(pl.col("rank") == 1)
 
     print(f"[exporter] writing parquet → {RECOMMENDATIONS_TOP10_PARQUET}")
@@ -325,8 +374,10 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--limit", type=int, default=None,
                         help="Limit number of unique orders to score (sample mode)")
+    parser.add_argument("--chunk-size", type=int, default=20_000,
+                        help="Orders per chunk (default 20000; reduce on low-RAM machines)")
     args = parser.parse_args()
-    export(limit=args.limit)
+    export(limit=args.limit, chunk_size=args.chunk_size)
 
 
 if __name__ == "__main__":
