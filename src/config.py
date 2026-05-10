@@ -39,3 +39,17 @@ GOLD_PARQUETS = {
 MODELS_DIR_GCS   = f"{GCS_BUCKET}/models"
 CLUSTERS_PARQUET = f"{GCS_BUCKET}/data/processed/prestador_clusters.parquet"
 
+# ── Artefactos del motor de asignación (Día 3) ───────────────────────────────
+# El batch exporter escribe estos parquets y luego los carga a BQ
+# (sura_clustering_processed.{assignments,recommendations_top10,kpis_summary}).
+ASSIGNMENTS_PARQUET           = f"{GCS_BUCKET}/data/processed/assignments.parquet"
+RECOMMENDATIONS_TOP10_PARQUET = f"{GCS_BUCKET}/data/processed/recommendations_top10.parquet"
+KPIS_SUMMARY_PARQUET          = f"{GCS_BUCKET}/data/processed/kpis_summary.parquet"
+
+# ── Tablas BigQuery que consume el dashboard (JS + Power BI) ─────────────────
+BQ_TABLE_ASSIGNMENTS            = f"{BQ_DATASET_GOLD}.assignments"
+BQ_TABLE_RECOMMENDATIONS_TOP10  = f"{BQ_DATASET_GOLD}.recommendations_top10"
+BQ_TABLE_PRESTADOR_CLUSTERS     = f"{BQ_DATASET_GOLD}.prestador_clusters"
+BQ_TABLE_CLUSTER_PROFILE        = f"{BQ_DATASET_GOLD}.cluster_profile"
+BQ_TABLE_KPIS_SUMMARY           = f"{BQ_DATASET_GOLD}.kpis_summary"
+
