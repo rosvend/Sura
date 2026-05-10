@@ -43,7 +43,7 @@ PCA_VARIANCE_TARGET = 0.90
 DEFAULT_K_RANGE = range(3, 11)
 DEFAULT_HDBSCAN_MCS = (50, 100, 150)
 RANDOM_STATE = 42
-MIN_CLUSTER_SIZE = 50
+MIN_CLUSTER_SIZE = 20
 
 # Features con colas pesadas (costos, conteos altos, duraciones) que distorsionan
 # PCA si entran sin transformar. Se aplica log1p antes del scaler para que la
@@ -64,7 +64,7 @@ LOG_FEATURES = frozenset({
 # manual en Día 3. Empíricamente, la primera corrida sin quarantine produjo
 # 27 outliers degenerados en clusters de tamaño 24+3 sobre 5,449 prestadores;
 # 0.01 (≈55) cubre eso con margen sin esconder subclusters reales.
-IFOREST_CONTAMINATION = 0.01
+IFOREST_CONTAMINATION = 0.03
 
 # ── Helpers GCS ──────────────────────────────────────────────────────────────
 # joblib no soporta gs:// directamente; abrimos el handle con gcsfs y le pasamos
