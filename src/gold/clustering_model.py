@@ -43,7 +43,17 @@ PCA_VARIANCE_TARGET = 0.90
 DEFAULT_K_RANGE = range(3, 11)
 DEFAULT_HDBSCAN_MCS = (50, 100, 150)
 RANDOM_STATE = 42
-MIN_CLUSTER_SIZE = 20
+
+# Tamaño mínimo para que un cluster se considere "real" (operativamente útil).
+# Clusters por debajo de este umbral se reasignan a -1 (ruido) en post-fit,
+# uniéndose a los outliers ya marcados por IsolationForest. Esto absorbe los
+# micro-grupos residuales (~11–24 prestadores) que persistían en todos los k
+# tras el quarantine — son extremos en ejes que IF no pondera lo suficiente.
+MIN_KEPT_CLUSTER_SIZE = 100
+
+# Mínimo de clusters "reales" para aceptar un k. Garantiza que el modelo
+# entregue al menos esta cantidad de arquetipos diferenciados a Día 2.
+MIN_N_KEPT_CLUSTERS = 3
 
 # Features con colas pesadas (costos, conteos altos, duraciones) que distorsionan
 # PCA si entran sin transformar. Se aplica log1p antes del scaler para que la
@@ -210,30 +220,32 @@ def evaluate_hdbscan(X_pca: np.ndarray, mcs_values: Iterable[int] = DEFAULT_HDBS
 
 def _select_kmeans(
     results: list[KMeansResult],
-    min_cluster_size: int = MIN_CLUSTER_SIZE,
+    min_kept_size: int = MIN_KEPT_CLUSTER_SIZE,
+    min_n_kept: int = MIN_N_KEPT_CLUSTERS,
 ) -> KMeansResult:
-    """Selecciona k combinando silhouette con interpretabilidad de negocio.
+    """Selecciona k por silhouette entre k con suficientes clusters "reales".
 
-    Reglas:
-      1. Filtrar k cuyo cluster más pequeño tenga >= min_cluster_size prestadores.
-      2. De esos, elegir el de mayor silhouette.
+    Un cluster es "real" si tiene >= min_kept_size prestadores. Los clusters
+    pequeños se absorben en post-fit como ruido (-1), por lo que aquí solo
+    necesitamos garantizar que sobren al menos min_n_kept arquetipos
+    interpretables.
 
-    Si ningún k cumple (1), se levanta `RuntimeError` con la grilla completa.
-    La corrida anterior cayó en un fallback silencioso → split [5422, 24, 3]
-    con silhouette 0.947. Preferimos parar y triagear (subir contamination,
-    revisar features) que enviar un modelo degenerado a Día 2.
+    Si ningún k satisface la regla, se levanta `RuntimeError` con la grilla.
     """
-    elegibles = [r for r in results if min(r.cluster_sizes) >= min_cluster_size]
+    elegibles = [
+        r for r in results
+        if sum(s >= min_kept_size for s in r.cluster_sizes) >= min_n_kept
+    ]
     if not elegibles:
         grid = "\n".join(
             f"  k={r.k:2d}  silhouette={r.silhouette:.3f}  sizes={r.cluster_sizes}"
             for r in results
         )
         raise RuntimeError(
-            f"Ningún k produjo todos los clusters >= {min_cluster_size} prestadores.\n"
+            f"Ningún k produjo >= {min_n_kept} clusters de tamaño >= {min_kept_size}.\n"
             f"Grilla KMeans:\n{grid}\n"
-            f"Triage: subir IFOREST_CONTAMINATION (e.g., 0.02), revisar LOG_FEATURES, "
-            f"o investigar features con varianza extrema (probable: costo_logistico_prom)."
+            f"Triage: ajustar MIN_KEPT_CLUSTER_SIZE / MIN_N_KEPT_CLUSTERS, subir "
+            f"IFOREST_CONTAMINATION, o revisar features con varianza extrema."
         )
     return max(elegibles, key=lambda r: r.silhouette)
 
@@ -268,13 +280,45 @@ def fit_and_persist(
     inlier_labels = final_model.labels_
     inlier_dists = distances_all[np.arange(len(inlier_labels)), inlier_labels]
 
+    # ── Post-hoc: clusters pequeños → ruido (-1) ────────────────────────────
+    # KMeans peló micro-clusters de ~10–25 prestadores que IsolationForest no
+    # alcanzó (extremos en ejes que IF no pondera lo suficiente). Los absorbemos
+    # como ruido aquí en vez de fallar la corrida — preservamos los 3–4
+    # arquetipos reales y unificamos ruido en el bucket -1 ya existente.
+    sizes_per_cluster = np.bincount(inlier_labels, minlength=selected.k)
+    kept_old_ids = np.where(sizes_per_cluster >= MIN_KEPT_CLUSTER_SIZE)[0]
+    n_kept_clusters = int(len(kept_old_ids))
+
+    cluster_id_remap = np.full(selected.k, -1, dtype=np.int32)
+    for new_id, old_id in enumerate(kept_old_ids):
+        cluster_id_remap[old_id] = new_id
+
+    inlier_labels_kept = cluster_id_remap[inlier_labels]
+    n_relabeled_as_noise = int((inlier_labels_kept == -1).sum())
+    kept_cluster_sizes = [int(sizes_per_cluster[old_id]) for old_id in kept_old_ids]
+    inlier_dists_kept = np.where(inlier_labels_kept == -1, 0.0, inlier_dists)
+
+    # Silhouette recomputado solo sobre los clusters preservados, para que la
+    # métrica reportada refleje la calidad real de los arquetipos finales y no
+    # quede inflada por la separación trivial de los micro-clusters de ruido.
+    kept_mask_inliers = inlier_labels_kept != -1
+    if (
+        kept_mask_inliers.sum() >= 2
+        and len(np.unique(inlier_labels_kept[kept_mask_inliers])) >= 2
+    ):
+        silhouette_kept = float(silhouette_score(
+            X_pca[kept_mask_inliers], inlier_labels_kept[kept_mask_inliers]
+        ))
+    else:
+        silhouette_kept = None
+
     # Reconstruir labels y distancias en el orden original del df: outliers
-    # quedan con cluster_id = -1 y distance_to_centroid = 0.0 para que el
-    # parquet preserve los 5,449 prestadores y Día 3 pueda filtrar cluster -1.
+    # IF + clusters pequeños comparten cluster_id = -1; preservamos las 5,449
+    # filas para que Día 3 filtre por cluster != -1.
     full_labels = np.full(n_rows, -1, dtype=np.int32)
-    full_labels[inlier_mask] = inlier_labels.astype(np.int32)
+    full_labels[inlier_mask] = inlier_labels_kept.astype(np.int32)
     full_dists = np.zeros(n_rows, dtype=np.float64)
-    full_dists[inlier_mask] = inlier_dists
+    full_dists[inlier_mask] = inlier_dists_kept
 
     df_out = df.select([
         "DNI_PRESTADOR",
@@ -292,10 +336,11 @@ def fit_and_persist(
 
     df_out.write_parquet(clusters_parquet)
 
-    _joblib_dump_gcs(scaler,      f"{models_dir}/scaler.joblib")
-    _joblib_dump_gcs(pca,         f"{models_dir}/pca.joblib")
-    _joblib_dump_gcs(final_model, f"{models_dir}/model.joblib")
-    _joblib_dump_gcs(iforest,     f"{models_dir}/isolation_forest.joblib")
+    _joblib_dump_gcs(scaler,           f"{models_dir}/scaler.joblib")
+    _joblib_dump_gcs(pca,              f"{models_dir}/pca.joblib")
+    _joblib_dump_gcs(final_model,      f"{models_dir}/model.joblib")
+    _joblib_dump_gcs(iforest,          f"{models_dir}/isolation_forest.joblib")
+    _joblib_dump_gcs(cluster_id_remap, f"{models_dir}/cluster_id_remap.joblib")
 
     # pct_empresa_compleja salió mediana=0 en los 3 clusters de la primera
     # corrida. Persistimos el describe para triagearlo desde Día 2 (binarizar
@@ -309,7 +354,9 @@ def fit_and_persist(
     metadata = {
         "n_rows": int(n_rows),
         "n_inliers": n_inliers,
-        "n_outliers": n_outliers,
+        "n_outliers_iforest": n_outliers,
+        "n_relabeled_as_noise": n_relabeled_as_noise,
+        "n_total_noise": int(n_outliers + n_relabeled_as_noise),
         "iforest_contamination": IFOREST_CONTAMINATION,
         "log_features": sorted(LOG_FEATURES),
         "n_features_in": int(n_features),
@@ -319,8 +366,13 @@ def fit_and_persist(
         "selected": asdict(selected),
         "kmeans_grid": [asdict(r) for r in kmeans_results],
         "hdbscan_grid": [asdict(r) for r in hdbscan_results],
+        "n_kept_clusters": n_kept_clusters,
+        "kept_cluster_sizes": kept_cluster_sizes,
+        "silhouette_kept": silhouette_kept,
+        "cluster_id_remap": cluster_id_remap.tolist(),
         "random_state": RANDOM_STATE,
-        "min_cluster_size": MIN_CLUSTER_SIZE,
+        "min_kept_cluster_size": MIN_KEPT_CLUSTER_SIZE,
+        "min_n_kept_clusters": MIN_N_KEPT_CLUSTERS,
         "parquet_path": clusters_parquet,
         "models_dir": models_dir,
         "pct_empresa_compleja_describe": pct_complex_describe,
@@ -331,22 +383,28 @@ def fit_and_persist(
 
 def load_pipeline(
     models_dir: str = MODELS_DIR_GCS,
-) -> tuple[RobustScaler, PCA, KMeans, IsolationForest]:
+) -> tuple[RobustScaler, PCA, KMeans, IsolationForest, np.ndarray]:
     scaler  = _joblib_load_gcs(f"{models_dir}/scaler.joblib")
     pca     = _joblib_load_gcs(f"{models_dir}/pca.joblib")
     model   = _joblib_load_gcs(f"{models_dir}/model.joblib")
     iforest = _joblib_load_gcs(f"{models_dir}/isolation_forest.joblib")
-    return scaler, pca, model, iforest
+    remap   = _joblib_load_gcs(f"{models_dir}/cluster_id_remap.joblib")
+    return scaler, pca, model, iforest, remap
 
 
 def assign(df_features: pl.DataFrame, models_dir: str = MODELS_DIR_GCS) -> np.ndarray:
     """Asigna cluster_id a un DataFrame con las columnas FEATURE_COLS.
 
-    Aplica el mismo pipeline que `fit_and_persist`: log1p sobre LOG_FEATURES,
-    IsolationForest gate (outliers → -1), y KMeans sobre los inliers.
-    Devuelve un np.ndarray de int en el orden de las filas de df_features.
+    Aplica el mismo pipeline que `fit_and_persist`:
+      1. log1p sobre LOG_FEATURES
+      2. IsolationForest gate (outliers → -1)
+      3. KMeans sobre los inliers, devolviendo IDs originales del modelo
+      4. Remap: IDs originales → IDs compactos del parquet (clusters
+         pequeños suprimidos durante el fit también caen a -1)
+
+    Devuelve np.ndarray de int en el orden de las filas de df_features.
     """
-    scaler, pca, model, iforest = load_pipeline(models_dir)
+    scaler, pca, model, iforest, remap = load_pipeline(models_dir)
 
     df_log = df_features.with_columns([
         pl.col(c).log1p() for c in LOG_FEATURES if c in FEATURE_COLS
@@ -357,17 +415,30 @@ def assign(df_features: pl.DataFrame, models_dir: str = MODELS_DIR_GCS) -> np.nd
     out = np.full(X.shape[0], -1, dtype=np.int32)
     if inlier_mask.any():
         X_in = X[inlier_mask]
-        labels = model.predict(pca.transform(scaler.transform(X_in)))
-        out[inlier_mask] = labels.astype(np.int32)
+        raw_labels = model.predict(pca.transform(scaler.transform(X_in)))
+        out[inlier_mask] = remap[raw_labels].astype(np.int32)
     return out
 
 
 if __name__ == "__main__":
     meta = fit_and_persist()
     sel = meta["selected"]
-    print(f"Inliers: {meta['n_inliers']:,}  Outliers (cluster_id=-1): {meta['n_outliers']:,}")
+    sil_kept = meta["silhouette_kept"]
+    sil_kept_str = f"{sil_kept:.3f}" if sil_kept is not None else "n/a"
+    print(
+        f"Inliers: {meta['n_inliers']:,}  "
+        f"IF outliers: {meta['n_outliers_iforest']:,}  "
+        f"Small-cluster relabel: {meta['n_relabeled_as_noise']:,}  "
+        f"→ Total noise: {meta['n_total_noise']:,}"
+    )
     print(f"PCA components: {meta['pca_components']} (var={meta['pca_variance_explained']:.3f})")
-    print(f"Selected k={sel['k']}  silhouette={sel['silhouette']:.3f}  "
-          f"CH={sel['calinski_harabasz']:.0f}  DB={sel['davies_bouldin']:.3f}")
-    print(f"Cluster sizes: {sel['cluster_sizes']}")
+    print(
+        f"Selected k={sel['k']}  raw silhouette={sel['silhouette']:.3f}  "
+        f"CH={sel['calinski_harabasz']:.0f}  DB={sel['davies_bouldin']:.3f}"
+    )
+    print(f"KMeans raw sizes: {sel['cluster_sizes']}")
+    print(
+        f"Kept {meta['n_kept_clusters']} arquetipos: {meta['kept_cluster_sizes']}  "
+        f"silhouette_kept={sil_kept_str}"
+    )
     print(f"Wrote: {meta['parquet_path']}")
