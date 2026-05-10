@@ -38,6 +38,17 @@ _TIPO_PERFIL_ORD: dict[str, int] = {
 # ── Features que entran al modelo de clustering ──────────────────────────────
 # Organizadas por dimensión (diagnóstico §5.1). Este listado es la referencia
 # canónica para el notebook: sklearn recibe df[FEATURE_COLS].
+#
+# Auditoría 2026-05-09 (post-Día 1.5): eliminadas 5 features que se materializan
+# constantes o redundantes en el inlier set y forzaban PCA a colapsar a 3 ejes:
+#   - n_municipios_cobertura      → todos los prestadores tienen valor 1
+#                                   (probable bug de aggregation en feat_prestador_perfil)
+#   - ratio_cobertura_real        → idéntica a n_municipios_destino dado lo anterior
+#   - pct_empresa_compleja        → idénticamente 0 en p1..p99 (bug downstream o
+#                                   match con segmentación nunca produce hits)
+#   - n_redes                     → ≥99% de los prestadores tienen valor 1, max=3
+#   - tasa_aprobacion_auto        → corr 0.969 con tasa_aprobacion_informe; pct_50=1.0
+# Los bugs subyacentes (cobertura, complexity match) son trabajo de Día 2 si hay tiempo.
 FEATURE_COLS: list[str] = [
     # Dimensión técnica
     # n_productos_distintos eliminado: alta correlación con n_tareas_distintas y
@@ -51,9 +62,7 @@ FEATURE_COLS: list[str] = [
     "pct_tareas_tratamiento",   # fracción de tareas en etapa operativa (TRA)
 
     # Dimensión geográfica
-    "n_municipios_cobertura",
     "n_municipios_destino",
-    "ratio_cobertura_real",    # n_municipios_destino / n_municipios_cobertura
 
     # Dimensión de desempeño (perfil real 2025)
     "tasa_ejecucion",
@@ -62,27 +71,20 @@ FEATURE_COLS: list[str] = [
     # tasa_cancela_prestador incluía ~79,3% de ruido de política interna.
     "tasa_cancela_real_prestador",
     "tasa_aprobacion_informe",
-    "tasa_aprobacion_auto",
     "dias_ciclo_informe_prom",
     "duracion_promedio_ejecutada",
 
     # Dimensión de carga
     "n_citas_total",
     "n_empresas_atendidas",
-    "utilizacion_capacidad",
+    "utilizacion_capacidad",     # tail extremo (max=1202); log1p en clustering_model
     "pct_programaciones_campo",  # fracción de programaciones que son visitas presenciales
-
-    # Dimensión de match demanda (perfil de clientes realmente atendidos)
-    # Captura si el prestador sirve clientes de alta complejidad (Gran/Mediana Empresa)
-    # vs. clientes simples (Micro, Independiente). Prioridad #1 en Q&A: especialización.
-    "pct_empresa_compleja",
 
     # Dimensión de costo logístico
     "costo_logistico_prom",
 
     # Dimensión de red y antigüedad
     "es_red_estrategica",     # binaria derivada de TIPO_DE_RED
-    "n_redes",
     "antiguedad_dias",
 ]
 
@@ -135,14 +137,11 @@ def _imputar_nulos(df: pl.LazyFrame) -> pl.LazyFrame:
     _imputar_cero = [
         "tasa_cancela_real_prestador",   # null = nunca tuvo cancelaciones con motivo → 0
         "tasa_aprobacion_informe",
-        "tasa_aprobacion_auto",
         "duracion_promedio_ejecutada",
         "utilizacion_capacidad",
         "pct_programaciones_campo",  # null solo si n_programaciones_total == 0 (imposible para activos)
-        "pct_empresa_compleja",      # null = sin citas CAMPO ejecutadas (prestador virtual) → 0
         "costo_logistico_prom",
         "n_municipios_destino",
-        "ratio_cobertura_real",      # null si sin destinos registrados o sin catálogo geográfico
         "es_red_estrategica",
         "pct_tareas_nuevo_modelo",   # null = ninguna tarea del prestador está en el Maestro → 0
         "pct_tareas_tratamiento",    # null = ninguna tarea del prestador está en el Maestro → 0

@@ -55,9 +55,14 @@ MIN_KEPT_CLUSTER_SIZE = 100
 # entregue al menos esta cantidad de arquetipos diferenciados a Día 2.
 MIN_N_KEPT_CLUSTERS = 3
 
-# Features con colas pesadas (costos, conteos altos, duraciones) que distorsionan
-# PCA si entran sin transformar. Se aplica log1p antes del scaler para que la
-# varianza del cuerpo de la distribución no quede aplastada por la cola.
+# Features con colas pesadas (costos, conteos altos, duraciones, ratios fuera
+# de rango por errores de unidad) que distorsionan PCA si entran sin transformar.
+# Se aplica log1p antes del scaler para que la varianza del cuerpo de la
+# distribución no quede aplastada por la cola.
+#
+# utilizacion_capacidad incluida porque su raw max=1202 vs. p99=43 indica datos
+# de catálogo con `capacidad` mal seteada (probable default=1). log1p comprime
+# de 1202 → 7.09 sin clippear (preservamos el ranking ordinal de los outliers).
 LOG_FEATURES = frozenset({
     "n_citas_total",
     "n_empresas_atendidas",
@@ -65,8 +70,8 @@ LOG_FEATURES = frozenset({
     "antiguedad_dias",
     "dias_ciclo_informe_prom",
     "duracion_promedio_ejecutada",
-    "n_municipios_cobertura",
     "n_municipios_destino",
+    "utilizacion_capacidad",
 })
 
 # Fracción de prestadores marcados como outliers por IsolationForest. Estos
@@ -342,15 +347,6 @@ def fit_and_persist(
     _joblib_dump_gcs(iforest,          f"{models_dir}/isolation_forest.joblib")
     _joblib_dump_gcs(cluster_id_remap, f"{models_dir}/cluster_id_remap.joblib")
 
-    # pct_empresa_compleja salió mediana=0 en los 3 clusters de la primera
-    # corrida. Persistimos el describe para triagearlo desde Día 2 (binarizar
-    # vs. dropear) sin tener que volver a Colab.
-    pct_complex_describe = (
-        df.select("pct_empresa_compleja").describe().to_dicts()
-        if "pct_empresa_compleja" in df.columns
-        else None
-    )
-
     metadata = {
         "n_rows": int(n_rows),
         "n_inliers": n_inliers,
@@ -375,7 +371,6 @@ def fit_and_persist(
         "min_n_kept_clusters": MIN_N_KEPT_CLUSTERS,
         "parquet_path": clusters_parquet,
         "models_dir": models_dir,
-        "pct_empresa_compleja_describe": pct_complex_describe,
     }
     _write_text_gcs(json.dumps(metadata, indent=2), f"{models_dir}/metadata.json")
     return metadata
