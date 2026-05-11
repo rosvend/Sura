@@ -450,12 +450,12 @@ Replay de 532 K órdenes 2025 (Ordenado con DNI_Prestador asignado real):
 |---|---:|---:|---:|---:|:---:|
 | K1 Cancelación esp. | 9.0 % | 11.0 % (+22 %) | 12.0 % (+33 %) | −15 % | ninguno PASS |
 | K2 Gini carga | 0.748 | 0.915 (+22 %) | 0.821 (+10 %) | −10 % | lp mejora |
-| K3 Costo logístico | $13,394 | **$11,457 (−14.5 %)** | $16,231 (+20 %) | −5 % | rb PASS |
-| K4 Match geo | 69.6 % | **81.6 % (+12.0 pp)** | 82.1 % (+12.7 pp) | +10 pp | ambos PASS |
+| K3 Costo logístico | $13,898 | **$11,480 (−17.4 %)** | $16,302 (+16.5 %) | −5 % | rb PASS |
+| K4 Match geo | 69.6 % | **81.6 % (+12.0 pp)** | 82.2 % (+12.8 pp) | +10 pp | ambos PASS |
 
 **Reading:** los dos escenarios son útiles para audiencias distintas.
 
-- **rule_based** es la recomendación operativa: ahorra COP $1,175 M / año
+- **rule_based** es la recomendación operativa: ahorra COP $1,468 M / año
   en logística y reduce desplazamientos. La concentración de carga es
   una externalidad documentada que requiere expansión de red.
 - **lp_optimized** es el diagnóstico de capacidad: muestra qué tan

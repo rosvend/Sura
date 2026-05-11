@@ -1,13 +1,14 @@
 # Simulación de Impacto — Motor de Asignación vs. Status Quo
 
-**Fecha:** 2026-05-10 · **Commit del modelo:** `033a18d` · **Escenario:** `rule_based`
+**Fecha:** 2026-05-10 · **Commit del modelo:** `e1f5cda` · **Escenario:** `rule_based`
 
-Esta nota resume la primera corrida de la simulación de impacto. Hace replay
-de **532,155 órdenes históricas** (Ordenado, todas las que tienen empresa,
+Esta nota resume la simulación de impacto post-hardening (commit `e1f5cda`,
+métricas honestas sin imputación de nulls a cero). Hace replay de
+**532,169 órdenes históricas** (Ordenado, todas las que tienen empresa,
 tarea, municipio y prestador asignado conocido) y compara dos asignaciones:
 
 - **Baseline:** el prestador realmente asignado en `Ordenado.Dni_Prestador`.
-- **Modelo:** la recomendación top-1 del motor de scoring (commit `033a18d`),
+- **Modelo:** la recomendación top-1 del motor de scoring (commit `e1f5cda`),
   leída de `sura_clustering_processed.assignments`.
 
 Para cada KPI comparamos el promedio (ponderado por orden) del atributo del
@@ -21,8 +22,8 @@ Probamos **dos escenarios** de asignación contra el baseline histórico:
 |--:|---|---:|---:|---:|---:|---:|
 | K1 | Tasa esperada de cancelación | 9.0 % | 11.0 % | +22 % ❌ | 12.0 % | +33 % ❌ |
 | K2 | Gini de carga | 0.748 | 0.915 | +22 % ❌ | **0.821** | +10 % ❌ ↓ |
-| K3 | Costo logístico esperado (COP) | $13,394 | **$11,457** | **−14.5 %** ✅ | $16,231 | +20 % ❌ |
-| K4 | Match geográfico (muni base = muni destino) | 69.6 % | **81.6 %** | **+12.0 pp** ✅ | **82.1 %** | **+12.7 pp** ✅ |
+| K3 | Costo logístico esperado (COP) | $13,898 | **$11,480** | **−17.4 %** ✅ | $16,302 | +16.5 % ❌ |
+| K4 | Match geográfico (muni base = muni destino) | 69.6 % | **81.6 %** | **+12.0 pp** ✅ | **82.2 %** | **+12.8 pp** ✅ |
 
 **rule_based gana 2 de 4 KPIs · lp_optimized gana 1 de 4.**
 
@@ -41,12 +42,16 @@ sin perder calidad por orden.
 
 ## Lectura por KPI
 
-### K3 — Costo logístico esperado · ✅ −14.5 %
+### K3 — Costo logístico esperado · ✅ −17.4 %
 
 El modelo prefiere prestadores con menor costo histórico de transporte +
 viáticos (`feat_prestador.costo_logistico_prom`). El delta absoluto de
-−$1,937 por orden, escalado a las ~607 K órdenes anuales en Ordenado,
-implica un ahorro **anual esperado de ≈ COP $1,175 M** sólo en logística.
+−$2,418 por orden, escalado a las ~607 K órdenes anuales en Ordenado,
+implica un ahorro **anual esperado de ≈ COP $1,468 M** sólo en logística.
+(El número es notablemente más alto que en la primera corrida porque
+ahora el cálculo descarta nulls en lugar de imputarlos a cero — eso
+subía artificialmente el "baseline" y reducía el delta. Ver `kpis.py`
+commit `e1f5cda`.)
 
 ### K4 — Match geográfico · ✅ +12.0 puntos porcentuales
 
@@ -90,7 +95,7 @@ correctamente la oportunidad pero no puede resolverla solo.
 ## Recomendación de Deployment
 
 Para la operación: **rule_based** (mejor costo y match geográfico,
-ahorra COP $1,175 M/año en logística). Documentar el deterioro de K2
+ahorra COP $1,468 M/año en logística). Documentar el deterioro de K2
 como deuda operativa que requiere expansión de capacidad en municipios
 de demanda concentrada.
 
