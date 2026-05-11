@@ -61,6 +61,31 @@ from src.assignment.score import (
     W_SPEC,
 )
 
+# Esquema canónico de salida de _score_chunk. Necesario porque un chunk vacío
+# antes producía un DataFrame de 0 columnas, lo que rompía pl.concat aguas
+# abajo y silenciaba el error.
+_EMPTY_TOP10_SCHEMA: dict[str, pl.DataType] = {
+    "Dni_Empresa":          pl.Utf8,
+    "Codigo_Tarea":         pl.Utf8,
+    "cd_municipio_destino": pl.Utf8,
+    "rank":                 pl.UInt32,
+    "DNI_PRESTADOR":        pl.Utf8,
+    "score_total":          pl.Float64,
+    "score_specialization": pl.Float64,
+    "score_capacity":       pl.Float64,
+    "score_geo":            pl.Float64,
+    "score_performance":    pl.Float64,
+    "cluster_id":           pl.Int32,
+    "archetype_name":       pl.Utf8,
+    "tipo_perfil":          pl.Utf8,
+    "utilizacion_capacidad":pl.Float64,
+    "nombre_distribuidor":  pl.Utf8,
+}
+
+
+def _empty_top10() -> pl.DataFrame:
+    return pl.DataFrame(schema=_EMPTY_TOP10_SCHEMA)
+
 
 def _build_candidate_pool() -> tuple[pl.DataFrame, pl.DataFrame]:
     """Devuelve (pool_tarea, muni_lookup).
@@ -190,7 +215,8 @@ def _score_chunk(
       5. Combinación de scores y rank top-10.
     """
     if orders.is_empty():
-        return pl.DataFrame()
+        print("[exporter] WARNING chunk received 0 input orders")
+        return _empty_top10()
 
     o = orders.with_columns(
         pl.col("Macrosegmentacion_Desc").fill_null("").str.to_uppercase().alias("_seg_up")
@@ -210,14 +236,18 @@ def _score_chunk(
 
     joined = o.join(pool_tarea, left_on="Codigo_Tarea", right_on="CDTAREA", how="inner")
     if joined.is_empty():
-        return pl.DataFrame()
+        print(f"[exporter] WARNING chunk yielded 0 rows after CDTAREA join "
+              f"(orders={orders.height}, pool={pool_tarea.height})")
+        return _empty_top10()
 
     # Hard filter cluster gating.
     joined = joined.filter(
         ~pl.col("is_virtual_seg") | (pl.col("cluster_id") == CLUSTER_VIRTUAL)
     )
     if joined.is_empty():
-        return pl.DataFrame()
+        print(f"[exporter] WARNING chunk yielded 0 rows after cluster-gating "
+              f"filter (all orders were virtual_seg without cluster_id={CLUSTER_VIRTUAL})")
+        return _empty_top10()
 
     # Hash-semi-join para has_muni_match: existe (Codigo_Tarea, DNI_PRESTADOR, CDMUNICIPIO)
     # exacto en muni_lookup.
@@ -314,7 +344,11 @@ def _score_batch_chunked(
         parts.append(out)
         print(f"[exporter]   chunk {start:,}–{end:,}/{n:,}  "
               f"out_rows={out.height:,}  ({time.perf_counter() - t0:.1f}s)")
-    return pl.concat(parts) if parts else pl.DataFrame()
+    if not parts or all(p.is_empty() for p in parts):
+        print("[exporter] ERROR: no chunk produced any rows — aborting "
+              "(downstream BQ load would silently load 0 rows)")
+        raise SystemExit(2)
+    return pl.concat(parts)
 
 
 def _refresh_bq(table: str, gs_uri: str) -> None:

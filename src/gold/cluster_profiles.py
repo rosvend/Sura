@@ -177,6 +177,23 @@ if __name__ == "__main__":
         "cluster_id", "archetype_name", "n_providers", "share_of_total",
         "pct_red_estrategica", "pct_solo_virtual", "top_bloque", "top_tipo_perfil",
     ]))
+
+    # ── Guardrail: validar que los nombres hardcoded siguen apuntando a los
+    # arquetipos correctos. Si KMeans reasignó IDs en un refit, este chequeo
+    # falla ruidosamente antes de que el dashboard muestre etiquetas erradas.
+    print("\n[VALIDATION] Los nombres de ARCHETYPE_NAMES están hardcoded contra "
+          "el fit commit 98e1d98 (random_state=42). Validar que:")
+    print("  · cluster_id=3 → mayor pct_solo_virtual (canal LIVIANA)")
+    print("  · cluster_id=0 → mayor n_providers y median_n_citas_total")
+    print("  · cluster_id=-1 → outliers/microclusters routed a revisión manual")
+    pdf = profile.to_pandas().set_index("cluster_id")
+    if 3 in pdf.index and pdf["pct_solo_virtual"].idxmax() != 3:
+        print(f"  ❌ cluster_id={pdf['pct_solo_virtual'].idxmax()} tiene mayor "
+              "pct_solo_virtual, no 3. ARCHETYPE_NAMES está desactualizado.")
+    if 0 in pdf.index and pdf["n_providers"].idxmax() != 0:
+        print(f"  ❌ cluster_id={pdf['n_providers'].idxmax()} tiene mayor "
+              "n_providers, no 0. ARCHETYPE_NAMES está desactualizado.")
+
     print()
     for cid in sorted(ARCHETYPE_NAMES.keys()):
         print(f"\n=== {ARCHETYPE_NAMES[cid]} (cluster {cid}) — top discriminadores ===")

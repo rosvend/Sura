@@ -56,6 +56,16 @@ KPI_TARGETS: dict[str, dict] = {
 }
 
 
+def _safe_mean(s: pl.Series, kpi: str, scenario: str, side: str) -> float:
+    """Mean robusto: NaN si la serie está vacía tras drop_nulls, en lugar de
+    una caída silenciosa a 0.0 que se confunde con un resultado real."""
+    clean = s.drop_nulls()
+    if clean.len() == 0:
+        print(f"[kpis] WARNING {scenario}/{kpi}/{side}: 0 non-null rows — KPI invalid")
+        return float("nan")
+    return float(clean.mean())
+
+
 def _gini(values: np.ndarray) -> float:
     """Coeficiente de Gini sobre un vector no-negativo (0 = igualdad, 1 = max desigualdad)."""
     if values.size == 0:
@@ -113,11 +123,21 @@ def _load_replay_table(assignments_parquet: str = ASSIGNMENTS_PARQUET) -> pl.Dat
     replay = hist.join(asg, on=["dni_empresa", "codigo_tarea", "cd_municipio_destino"], how="inner")
 
     # Anotar atributos por prestador (histórico y recomendado).
+    # Normalización defensiva de cdmunicipio_base: cd_municipio_destino sale ya
+    # sin sufijo ".0" (línea 91 arriba), así que aseguramos la misma forma del
+    # otro lado de la comparación de K4 — si el catálogo alguna vez deja un
+    # ".0" residual, K4 caería silenciosamente a 0.
     fp = pl.read_parquet(GOLD_PARQUETS["feat_prestador"]).select([
         "DNI_PRESTADOR", "cdmunicipio_base",
         "tasa_cancela_real_prestador", "costo_logistico_prom",
         "duracion_promedio_ejecutada",
-    ])
+    ]).with_columns(
+        pl.when(pl.col("cdmunicipio_base").str.ends_with(".0"))
+        .then(pl.col("cdmunicipio_base").str.slice(
+            0, pl.col("cdmunicipio_base").str.len_chars() - 2))
+        .otherwise(pl.col("cdmunicipio_base"))
+        .alias("cdmunicipio_base")
+    )
 
     replay = (
         replay
@@ -144,8 +164,8 @@ def compute_kpis(replay: pl.DataFrame, scenario: str = "rule_based") -> pl.DataF
     print(f"[kpis] {scenario} · replay rows: {n:,}")
 
     # ── K1: Tasa esperada de cancelación ─────────────────────────────────────
-    k1_base = float(replay["tasa_cancela_hist"].drop_nulls().mean() or 0.0)
-    k1_mod  = float(replay["tasa_cancela_model"].drop_nulls().mean() or 0.0)
+    k1_base = _safe_mean(replay["tasa_cancela_hist"],  "K1", scenario, "baseline")
+    k1_mod  = _safe_mean(replay["tasa_cancela_model"], "K1", scenario, "model")
 
     # ── K2: Gini de carga ─────────────────────────────────────────────────────
     # Baseline: carga histórica = #órdenes asignadas a cada DNI_PRESTADOR.
@@ -162,9 +182,11 @@ def compute_kpis(replay: pl.DataFrame, scenario: str = "rule_based") -> pl.DataF
 
     # ── K3: Costo logístico esperado ─────────────────────────────────────────
     # Para cada orden, el costo logístico esperado es el costo_logistico_prom
-    # del prestador asignado (histórico vs. recomendado). Si null, 0.
-    k3_base = float(replay["costo_log_hist"].fill_null(0.0).mean())
-    k3_mod  = float(replay["costo_log_model"].fill_null(0.0).mean())
+    # del prestador asignado (histórico vs. recomendado). Excluimos nulls en
+    # lugar de imputarlos a 0 (sería un sesgo optimista hacia el modelo si los
+    # prestadores recomendados tienen menos historial que los históricos).
+    k3_base = _safe_mean(replay["costo_log_hist"],  "K3", scenario, "baseline")
+    k3_mod  = _safe_mean(replay["costo_log_model"], "K3", scenario, "model")
 
     # ── K4: Match geográfico ──────────────────────────────────────────────────
     # % de órdenes donde muni_base del prestador == municipio de entrega.

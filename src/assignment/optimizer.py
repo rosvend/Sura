@@ -67,6 +67,11 @@ def _greedy_capacitated_assign(top10: pl.DataFrame, cap: int) -> pl.DataFrame:
     `top10` debe tener: dni_empresa, codigo_tarea, cd_municipio_destino,
     rank, dni_prestador, score_total (y opcionalmente más).
     """
+    if top10.is_empty():
+        raise ValueError(
+            "[optimizer] empty top10 input — exporter probably failed silently. "
+            "Re-run src.assignment.exporter and verify it produced rows."
+        )
     print(f"[optimizer] greedy assign · cap={cap} órdenes/prestador · candidatos={top10.height:,}")
 
     # Ordenar por score desc para que los matches de mayor calidad ganen primero.
