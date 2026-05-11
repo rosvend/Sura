@@ -39,10 +39,13 @@ from src.config import (
     ASSIGNMENTS_PARQUET,
     BQ_PROJECT,
     BQ_TABLE_KPIS_SUMMARY,
+    GCS_BUCKET,
     GOLD_PARQUETS,
     KPIS_SUMMARY_PARQUET,
 )
 from src.silver.extract import load_ordenado
+
+ASSIGNMENTS_LP_PARQUET = f"{GCS_BUCKET}/data/processed/assignments_lp.parquet"
 
 # ── Targets (DIAGNOSTICO §5.4) ────────────────────────────────────────────────
 KPI_TARGETS: dict[str, dict] = {
@@ -66,9 +69,12 @@ def _gini(values: np.ndarray) -> float:
     return float((2 * np.arange(1, n + 1) * v).sum() / (n * cum) - (n + 1) / n)
 
 
-def _load_replay_table() -> pl.DataFrame:
+def _load_replay_table(assignments_parquet: str = ASSIGNMENTS_PARQUET) -> pl.DataFrame:
     """Une cada orden histórica con la recomendación del modelo + features
     del prestador histórico y del recomendado.
+
+    `assignments_parquet` permite alternar entre el escenario rule_based y
+    el escenario lp_optimized leyendo de archivos diferentes.
     """
     # Historical: una fila por orden cruda en Ordenado.
     hist = (
@@ -95,7 +101,7 @@ def _load_replay_table() -> pl.DataFrame:
     }).drop("Municipio_Entrega_Id")
 
     asg = (
-        pl.read_parquet(ASSIGNMENTS_PARQUET)
+        pl.read_parquet(assignments_parquet)
         .select([
             "dni_empresa", "codigo_tarea", "cd_municipio_destino",
             pl.col("dni_prestador").alias("dni_prestador_model"),
@@ -133,9 +139,9 @@ def _load_replay_table() -> pl.DataFrame:
     return replay
 
 
-def compute_kpis(replay: pl.DataFrame) -> pl.DataFrame:
+def compute_kpis(replay: pl.DataFrame, scenario: str = "rule_based") -> pl.DataFrame:
     n = replay.height
-    print(f"[kpis] replay rows: {n:,}")
+    print(f"[kpis] {scenario} · replay rows: {n:,}")
 
     # ── K1: Tasa esperada de cancelación ─────────────────────────────────────
     k1_base = float(replay["tasa_cancela_hist"].drop_nulls().mean() or 0.0)
@@ -202,7 +208,7 @@ def compute_kpis(replay: pl.DataFrame) -> pl.DataFrame:
         })
     target_df = pl.DataFrame(target_rows)
     return df.join(target_df, on="name", how="left").with_columns(
-        pl.lit("rule_based").alias("scenario"),
+        pl.lit(scenario).alias("scenario"),
         pl.lit(n).alias("n_orders"),
     )
 
@@ -227,16 +233,38 @@ def _refresh_bq(table: str, gs_uri: str) -> None:
     print(f"[kpis] BQ {table} refreshed in {time.perf_counter() - t0:.1f}s")
 
 
+def _has_lp_parquet() -> bool:
+    """True si gs://.../assignments_lp.parquet existe."""
+    try:
+        import gcsfs
+        return gcsfs.GCSFileSystem().exists(ASSIGNMENTS_LP_PARQUET)
+    except Exception:
+        return False
+
+
 def run() -> pl.DataFrame:
     t0 = time.perf_counter()
-    replay = _load_replay_table()
-    kpis = compute_kpis(replay)
-    print("\n[kpis] summary:")
-    print(kpis)
-    kpis.write_parquet(KPIS_SUMMARY_PARQUET)
+
+    print("[kpis] === rule_based ===")
+    replay_rb = _load_replay_table(ASSIGNMENTS_PARQUET)
+    rb = compute_kpis(replay_rb, scenario="rule_based")
+    print(rb)
+
+    parts = [rb]
+    if _has_lp_parquet():
+        print("\n[kpis] === lp_optimized ===")
+        replay_lp = _load_replay_table(ASSIGNMENTS_LP_PARQUET)
+        lp = compute_kpis(replay_lp, scenario="lp_optimized")
+        print(lp)
+        parts.append(lp)
+    else:
+        print("\n[kpis] (lp_optimized parquet ausente — corre src.assignment.optimizer primero)")
+
+    summary = pl.concat(parts)
+    summary.write_parquet(KPIS_SUMMARY_PARQUET)
     _refresh_bq(BQ_TABLE_KPIS_SUMMARY, KPIS_SUMMARY_PARQUET)
     print(f"\n[kpis] done in {time.perf_counter() - t0:.1f}s")
-    return kpis
+    return summary
 
 
 if __name__ == "__main__":

@@ -35,6 +35,16 @@ from src.gold.feat_prestador import build_prestador_features
 from src.silver.extract import load_tareas_prestador
 
 # ── Pesos (SURA_QA §6, prioridades especialización → capacidad → geo) ─────────
+# Re-tune 2026-05-10 (Día 4.5) — auditoría de pesos en 3 corridas:
+#   Run 1: (0.45, 0.30, 0.15, 0.10) → 2/4 PASS · K3 -14.5%, K4 +12pp
+#   Run 2: (0.35, 0.30, 0.15, 0.20) → 1/4 PASS · K1 neutral pero K3 +15% (perf y
+#          costo correlacionan negativo: prestadores con mejor desempeño tienen
+#          peor perfil de cobertura logística)
+#   Run 3: (0.40, 0.25, 0.20, 0.15) → 1/4 PASS · boost geo mejoró K4 a +15pp pero
+#          K3 +25% (los más locales no son los más baratos en promedio)
+# Conclusión: Run 1 es óptimo dadas las trade-offs intrínsecas del scorer greedy.
+# La mejora real en K2 (Gini) requiere capacidad como CONSTRAINT, no peso —
+# eso es Día 4.5/B (optimizer.py).
 W_SPEC = 0.45
 W_CAP  = 0.30
 W_GEO  = 0.15

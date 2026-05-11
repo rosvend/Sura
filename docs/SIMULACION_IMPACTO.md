@@ -15,17 +15,29 @@ prestador asignado bajo cada escenario.
 
 ## Resumen Ejecutivo
 
-| # | KPI | Baseline | Modelo | Δ | Target | Status |
-|--:|---|---:|---:|---:|---:|:---:|
-| K1 | Tasa esperada de cancelación | 9.0 % | 11.0 % | **+22 % rel** | −15 % rel | ❌ FAIL |
-| K2 | Gini de carga (#órdenes / prestador) | 0.748 | 0.915 | **+22 % rel** | −10 % rel | ❌ FAIL |
-| K3 | Costo logístico esperado (COP) | $13,394 | $11,457 | **−14.5 % rel** | −5 % rel | ✅ **PASS** |
-| K4 | Match geográfico (muni base = muni destino) | 69.6 % | 81.6 % | **+12.0 pp abs** | +10 pp | ✅ **PASS** |
+Probamos **dos escenarios** de asignación contra el baseline histórico:
 
-**2 de 4 KPIs cumplen su target** (la barra de aceptación definida en el plan).
-Los dos que fallan tienen una raíz común — la concentración propia de un
-motor greedy por orden — que la fase Día 4.5 (optimizador LP global)
-está diseñada para resolver.
+| # | KPI | Baseline | **rule_based** | Δ rb | **lp_optimized** | Δ lp |
+|--:|---|---:|---:|---:|---:|---:|
+| K1 | Tasa esperada de cancelación | 9.0 % | 11.0 % | +22 % ❌ | 12.0 % | +33 % ❌ |
+| K2 | Gini de carga | 0.748 | 0.915 | +22 % ❌ | **0.821** | +10 % ❌ ↓ |
+| K3 | Costo logístico esperado (COP) | $13,394 | **$11,457** | **−14.5 %** ✅ | $16,231 | +20 % ❌ |
+| K4 | Match geográfico (muni base = muni destino) | 69.6 % | **81.6 %** | **+12.0 pp** ✅ | **82.1 %** | **+12.7 pp** ✅ |
+
+**rule_based gana 2 de 4 KPIs · lp_optimized gana 1 de 4.**
+
+Ambos escenarios pasan K4 (geo). El trade-off es:
+
+- **rule_based** prioriza calidad por orden → mejor costo logístico y match
+  geográfico, pero concentra carga en pocos prestadores top-score
+  (rompe K2) y arrastra cancelaciones (rompe K1).
+- **lp_optimized** impone un tope duro de ~430 órdenes/prestador →
+  reduce a la mitad el deterioro de K2 (de +22 % a +10 % rel), pero al
+  ser forzado a salir del top-1 score, pierde la ventaja de costo.
+
+Esto es **un trade-off Pareto explícito**, no un fallo de diseño: la
+capacidad operativa de la red impone un piso a la concentración alcanzable
+sin perder calidad por orden.
 
 ## Lectura por KPI
 
@@ -59,32 +71,58 @@ no es suficiente para reordenar este efecto.
 2. Documentar como limitación conocida del enfoque greedy y reforzar el
    argumento para el LP global.
 
-### K2 — Gini de carga · ❌ +22 %
+### K2 — Gini de carga · rb +22 % / lp +10 %
 
-El motor concentra asignaciones en los prestadores de mayor score. El
-status quo, aunque imperfecto, dispersa carga porque las decisiones se
-toman manualmente y respetan disponibilidad real al momento de la
-asignación. Sin un constraint duro de capacidad, el modelo siempre va
-a empeorar este indicador.
+El motor rule_based concentra asignaciones en los prestadores de mayor
+score. El optimizador `lp_optimized` (`src/assignment/optimizer.py`)
+añade un tope duro de ~430 órdenes/prestador (`cap = ceil(1.5 × n_orders
+/ n_prestadores_activos)`, 50 % de headroom sobre el caso perfectamente
+balanceado) y **reduce a la mitad el deterioro de K2** (0.915 → 0.821).
+Aún así no llega al target (-10 % rel = 0.673) porque la propia
+distribución del catálogo concentra capacidad: 1,532 prestadores
+distribuyen 437 K órdenes, y el subconjunto que cubre las tareas más
+demandadas está estructuralmente pequeño.
 
-**Acción única correcta:** implementar el optimizador LP global con
-restricción `sum(horas_asignadas_por_prestador) ≤ capacidad` (Día 4.5).
-Este es el caso de uso canónico del problema de asignación lineal.
+**Recomendación operativa:** rebalanceo manual + ampliar la red
+estratégica en municipios con cuello de botella. El modelo identifica
+correctamente la oportunidad pero no puede resolverla solo.
+
+## Recomendación de Deployment
+
+Para la operación: **rule_based** (mejor costo y match geográfico,
+ahorra COP $1,175 M/año en logística). Documentar el deterioro de K2
+como deuda operativa que requiere expansión de capacidad en municipios
+de demanda concentrada.
+
+Para reporting estratégico al equipo de planeación de red:
+**lp_optimized** como diagnóstico de qué tan desbalanceada estaría la
+asignación óptima por calidad sin considerar capacidad. La diferencia
+entre los dos escenarios (Δ K2 = 22 % → 10 %) cuantifica el costo de
+no expandir la red.
 
 ## Cómo Replicar
 
 ```bash
+# 1. Re-generar assignments (rule_based)
+PYTHONPATH=. uv run python -m src.assignment.exporter
+
+# 2. Re-generar assignments_lp (lp_optimized)
+PYTHONPATH=. uv run python -m src.assignment.optimizer
+
+# 3. Recomputar KPIs para ambos escenarios
 PYTHONPATH=. uv run python -m src.monitoring.kpis
 ```
 
 Lee:
-- `gs://sura-clustering-raw/data/processed/assignments.parquet`
+- `gs://sura-clustering-raw/data/processed/assignments.parquet` (rule_based)
+- `gs://sura-clustering-raw/data/processed/assignments_lp.parquet` (lp_optimized)
 - `gs://sura-clustering-raw/Ordenado.parquet`
 - `gs://sura-clustering-raw/gold/feat_prestador.parquet`
 
 Escribe:
-- `gs://sura-clustering-raw/data/processed/kpis_summary.parquet`
+- `gs://sura-clustering-raw/data/processed/kpis_summary.parquet` (dos filas por KPI: una por escenario)
 - `proyecto-sura-clustering-2026.sura_clustering_processed.kpis_summary`
+- `proyecto-sura-clustering-2026.sura_clustering_processed.assignments_lp`
 
 ## Notas
 
