@@ -8,7 +8,7 @@ Pipeline end-to-end: ingestión cruda → features → clustering → motor de a
 
 ## TL;DR · Resultados
 
-Medidos sobre las **439,263 órdenes completas** de `Ordenado.parquet` (no muestra).
+Medidos sobre las **439,263 órdenes completas** de `Ordenado.parquet` (no es una muestra).
 
 - **Cuello de botella LIVIANA:** cluster 3 (Virtuales Especializados) opera a **ISC ≈ 3.58**; recibe 3.6× su capacidad. Requiere **+725 prestadores** o relajar el gate `LIVIANA → cluster_id=3` para llevarlo a ISC = 1.0.
 - **`rule_based` ahorra COP ~1,468 M/año** en costo logístico (K3 = −17.4 %) y mejora el match geográfico en **+12 puntos** (K4 = 81.6 % vs baseline 69.6 %).
@@ -83,12 +83,6 @@ PYTHONPATH=. uv run python scripts/publish_to_bq.py           # ~20 s  · refres
 
 Total < 5 min. Todas las tablas son idempotentes (`bq load --replace`).
 
-### Re-fits parciales
-
-- **Sólo nuevos pesos del scorer:** `exporter` + `optimizer` + `enrich_assignments` + `kpis` + `compute_isc` + `scenario_comparison`.
-- **Sólo nuevo clustering:** correr toda la secuencia desde `clustering_model`.
-- **Sólo refresh de KPIs:** `kpis` + `compute_isc` + `scenario_comparison`.
-
 ---
 
 ## Outputs · 14 tablas BigQuery
@@ -140,19 +134,6 @@ Sura/
 
 ---
 
-## Progreso por fase
-
-| Día | Entregable |
-|--:|---|
-| 1 | Bronze → Silver: loaders Polars LazyFrame con auto-detección de encoding y delimitador (`src/ingestion/`, `src/silver/`) |
-| 2 | Gold features: `feat_prestador` (perfil + desempeño 2025), `feat_empresa` (segmentación), `clustering_input` (19 features) (`src/gold/`) |
-| 3 | Clustering: IsolationForest (contamination=0.03 → 164 outliers) → PCA (var ≥ 0.90, ~6 componentes) → KMeans (k ∈ [3, 11], silhouette-selected) → 4 arquetipos + cluster −1 |
-| 4 | Motor de asignación: `exporter.py` vectorizado en Polars (hash semi-joins, chunked scoring 20K órdenes) + `optimizer.py` (greedy capacitado, headroom 1.5×) |
-| 5 | Simulación de KPIs: K1–K4 replay sobre las 439K órdenes completas, baseline vs modelo, ambos escenarios |
-| 6 | Capa "smoking gun": ISC + `prestadores_necesarios` (cluster 3 = +725), per-assignment contribution decomposition, scenario-diff (Gini −9.5 % / +COP 1.66 B), `EXECUTIVE_FINDINGS.md` |
-
----
-
 ## Documentación detallada
 
 ### Para el negocio
@@ -184,15 +165,3 @@ Sura/
 - [`PREGUNTAS_ESTRATEGICAS_DANIEL.md`](docs/PREGUNTAS_ESTRATEGICAS_DANIEL.md) — preguntas abiertas y supuestos del modelo.
 
 ---
-
-## Stack técnico
-
-Python 3.12 · uv · Polars 1.39 · scikit-learn 1.5 · BigQuery + GCS · Power BI
-
-## Licencia
-
-GPL v3 — ver [`LICENSE`](LICENSE).
-
-## Contacto
-
-`@Rosvend` · este repositorio.
