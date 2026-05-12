@@ -46,6 +46,8 @@ ASSIGNMENTS_PARQUET           = f"{GCS_BUCKET}/data/processed/assignments.parque
 RECOMMENDATIONS_TOP10_PARQUET = f"{GCS_BUCKET}/data/processed/recommendations_top10.parquet"
 KPIS_SUMMARY_PARQUET          = f"{GCS_BUCKET}/data/processed/kpis_summary.parquet"
 KPI_SATURACION_CLUSTER_PARQUET = f"{GCS_BUCKET}/data/processed/kpi_saturacion_cluster.parquet"
+ASSIGNMENTS_ENRICHED_PARQUET  = f"{GCS_BUCKET}/data/processed/assignments_enriched.parquet"
+RECOMMENDATIONS_ENRICHED_PARQUET = f"{GCS_BUCKET}/data/processed/recommendations_top10_enriched.parquet"
 
 # ── Tablas BigQuery que consume el dashboard (JS + Power BI) ─────────────────
 BQ_TABLE_ASSIGNMENTS            = f"{BQ_DATASET_GOLD}.assignments"
@@ -54,4 +56,6 @@ BQ_TABLE_PRESTADOR_CLUSTERS     = f"{BQ_DATASET_GOLD}.prestador_clusters"
 BQ_TABLE_CLUSTER_PROFILE        = f"{BQ_DATASET_GOLD}.cluster_profile"
 BQ_TABLE_KPIS_SUMMARY           = f"{BQ_DATASET_GOLD}.kpis_summary"
 BQ_TABLE_KPI_SATURACION_CLUSTER = f"{BQ_DATASET_GOLD}.kpi_saturacion_cluster"
+BQ_TABLE_ASSIGNMENTS_ENRICHED = f"{BQ_DATASET_GOLD}.assignments_enriched"
+BQ_TABLE_RECOMMENDATIONS_ENRICHED = f"{BQ_DATASET_GOLD}.recommendations_top10_enriched"
 

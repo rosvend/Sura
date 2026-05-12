@@ -22,9 +22,11 @@ con `--replace` por sus pipelines), así que un refresh nunca rompe lecturas.
 | 5 | `cluster_profile` | 5 | un resumen por cluster (incluye `-1`) |
 | 6 | `assignments` | 439,256 | top-1 recomendado por orden (rule_based) |
 | 7 | `recommendations_top10` | 2,792,168 | top-10 por orden (rule_based) |
-| 8 | `assignments_lp` | 437,571 | top-1 por orden (lp_optimized) |
-| 9 | `kpis_summary` | 8 | 4 KPIs × 2 escenarios |
-| 10 | `kpi_saturacion_cluster` | 4–8 | 1 fila por (cluster × escenario) — ISC + semáforo |
+| 8 | `assignments_enriched` | 439,256 | igual que 6 + top_contributor + 4 shares |
+| 9 | `recommendations_top10_enriched` | 2,792,168 | igual que 7 + top_contributor + 4 shares |
+| 10 | `assignments_lp` | 437,571 | top-1 por orden (lp_optimized) |
+| 11 | `kpis_summary` | 8 | 4 KPIs × 2 escenarios |
+| 12 | `kpi_saturacion_cluster` | 4–8 | 1 fila por (cluster × escenario) — ISC + semáforo |
 
 ---
 
@@ -127,7 +129,69 @@ WHERE dni_empresa = '<NIT>'
 ORDER BY rank
 ```
 
-### 2.5 `assignments_lp` (top-1 lp_optimized — alternativa balanceada)
+### 2.5 `assignments_enriched` y `recommendations_top10_enriched`
+
+Versiones enriquecidas de las tablas 2.3 y 2.4, producidas por
+`scripts/enrich_assignments.py`. Mismas columnas base, más 5 adicionales:
+
+```
+top_contributor    STRING    componente con mayor contribución ponderada al score_total
+                             Valores: "Especialización" | "Capacidad" | "Geográfico" | "Desempeño"
+                             Fórmula: argmax(W_SPEC×score_spec, W_CAP×score_cap,
+                                            W_GEO×score_geo, W_PERF×score_perf)
+                             Ejemplo: "Especialización"
+                             Power BI: etiqueta de tooltip "¿Por qué este prestador?"
+
+spec_share         FLOAT64   fracción del score_total aportada por especialización
+                             Fórmula: (0.45 × score_specialization) / score_total
+                             Rango: [0, 1] · Null si score_total = 0
+                             Ejemplo: 0.52
+                             Power BI: barra de progreso en tooltip (ancho = spec_share × 100%)
+
+cap_share          FLOAT64   fracción aportada por capacidad
+                             Fórmula: (0.30 × score_capacity) / score_total
+                             Ejemplo: 0.28
+                             Power BI: barra de progreso secundaria
+
+geo_share          FLOAT64   fracción aportada por cobertura geográfica
+                             Fórmula: (0.15 × score_geo) / score_total
+                             Ejemplo: 0.14
+                             Power BI: indicador de match geográfico en tooltip
+
+perf_share         FLOAT64   fracción aportada por desempeño operativo
+                             Fórmula: (0.10 × score_performance) / score_total
+                             Ejemplo: 0.06
+                             Power BI: barra complementaria; spec+cap+geo+perf = 1.0
+```
+
+Las cuatro shares suman 1.0 por construcción. Las tablas originales
+(`assignments`, `recommendations_top10`) no se modifican — estas son
+tablas adicionales que se pueden unir por `(dni_empresa, codigo_tarea,
+cd_municipio_destino, rank)`.
+
+**Query típica:** tooltip de drill-through "¿por qué este prestador?".
+```sql
+SELECT r.rank, r.dni_prestador, r.score_total,
+       r.top_contributor,
+       ROUND(r.spec_share, 2) AS pct_especializacion,
+       ROUND(r.cap_share,  2) AS pct_capacidad,
+       ROUND(r.geo_share,  2) AS pct_geografico,
+       ROUND(r.perf_share, 2) AS pct_desempeno,
+       r.archetype_name, r.tipo_perfil
+FROM `proyecto-sura-clustering-2026.sura_clustering_processed.recommendations_top10_enriched` r
+WHERE r.dni_empresa = '<NIT>'
+  AND r.codigo_tarea = '<TAREA>'
+  AND r.cd_municipio_destino = '<MUNI>'
+ORDER BY r.rank
+```
+
+**Cómo actualizar:** `PYTHONPATH=. uv run python scripts/enrich_assignments.py`
+(requiere que `assignments.parquet` y `recommendations_top10.parquet` en GCS
+estén frescos — correr después de `exporter.py`).
+
+---
+
+### 2.6 `assignments_lp` (top-1 lp_optimized — alternativa balanceada)
 
 Mismo esquema que `assignments` + columna extra:
 ```
@@ -137,7 +201,7 @@ scenario                      STRING   siempre "lp_optimized"
 Útil para mostrar la diferencia con `assignments` y argumentar el trade-off
 de capacidad.
 
-### 2.6 `kpis_summary` (4 KPIs × 2 escenarios = 8 filas)
+### 2.7 `kpis_summary` (4 KPIs × 2 escenarios = 8 filas)
 
 ```
 name                          STRING   "K1_tasa_cancelacion_esperada" | "K2_gini_carga" | "K3_costo_logistico_esperado" | "K4_match_geografico"
@@ -162,7 +226,7 @@ FROM `proyecto-sura-clustering-2026.sura_clustering_processed.kpis_summary`
 ORDER BY name, scenario
 ```
 
-### 2.7 `kpi_saturacion_cluster` (ISC por cluster × escenario)
+### 2.8 `kpi_saturacion_cluster` (ISC por cluster × escenario)
 
 Métrica post-hoc de presión operativa por cluster. **Independiente** de
 `kpis_summary` — su esquema (per-cluster) no es compatible con la forma
@@ -205,7 +269,7 @@ sobre `estado_saturacion`, o matriz heatmap `cluster_id × scenario` con
 arquetipo, lo que permite ver si `lp_optimized` redistribuye mejor que
 `rule_based` a nivel cluster.
 
-### 2.8 Tablas de soporte: `clustering_input`, `feat_prestador`, `feat_empresa`
+### 2.9 Tablas de soporte: `clustering_input`, `feat_prestador`, `feat_empresa`
 
 Estos son los **insumos crudos** del modelo. El dashboard normalmente no
 los consume directamente — usa `prestador_clusters` + `assignments`. Pero
