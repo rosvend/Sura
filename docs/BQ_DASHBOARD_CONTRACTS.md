@@ -366,6 +366,7 @@ Después de un re-fit del clustering o un re-export del motor:
 PYTHONPATH=. uv run python -m src.gold.clustering_model     # ~30 s
 PYTHONPATH=. uv run python -m src.assignment.exporter       # ~2 min
 PYTHONPATH=. uv run python -m src.assignment.optimizer      # ~25 s
+PYTHONPATH=. uv run python scripts/enrich_assignments.py    # ~15 s — top_contributor + shares
 PYTHONPATH=. uv run python -m src.monitoring.kpis           # ~30 s
 PYTHONPATH=. uv run python scripts/compute_isc.py           # ~5 s — ISC + prestadores_necesarios
 PYTHONPATH=. uv run python scripts/scenario_comparison.py   # ~20 s — trade-off RB ↔ LP
