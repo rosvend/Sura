@@ -24,6 +24,7 @@ con `--replace` por sus pipelines), así que un refresh nunca rompe lecturas.
 | 7 | `recommendations_top10` | 2,792,168 | top-10 por orden (rule_based) |
 | 8 | `assignments_lp` | 437,571 | top-1 por orden (lp_optimized) |
 | 9 | `kpis_summary` | 8 | 4 KPIs × 2 escenarios |
+| 10 | `kpi_saturacion_cluster` | 4–8 | 1 fila por (cluster × escenario) — ISC + semáforo |
 
 ---
 
@@ -161,7 +162,50 @@ FROM `proyecto-sura-clustering-2026.sura_clustering_processed.kpis_summary`
 ORDER BY name, scenario
 ```
 
-### 2.7 Tablas de soporte: `clustering_input`, `feat_prestador`, `feat_empresa`
+### 2.7 `kpi_saturacion_cluster` (ISC por cluster × escenario)
+
+Métrica post-hoc de presión operativa por cluster. **Independiente** de
+`kpis_summary` — su esquema (per-cluster) no es compatible con la forma
+"1 fila por (KPI × escenario)" de aquella tabla, así que vive aparte.
+Las páginas del dashboard que ya leen `kpis_summary` no se ven afectadas.
+
+```
+cluster_id            INT64    join key con prestador_clusters / cluster_profile
+archetype_name        STRING   "Generalistas Estratégicos…" etc. (ARCHETYPE_NAMES)
+scenario              STRING   "rule_based" | "lp_optimized"
+n_providers           INT64    prestadores activos en el cluster (excluye sin_capacidad)
+median_capacidad      FLOAT64  mediana de capacidad intra-cluster
+capacidad_estimada    FLOAT64  n_providers * median_capacidad
+tareas_asignadas      INT64    # filas en assignments(_lp) con ese cluster_id
+isc                   FLOAT64  tareas_asignadas / capacidad_estimada
+estado_saturacion     STRING   "Normal (Verde)"  ISC ≤ 0.85
+                               "Alerta (Amarillo)"  0.85 < ISC ≤ 1.0
+                               "Crítico (Rojo)"  ISC > 1.0
+computed_at           TIMESTAMP UTC en el momento del refresh — pill de freshness
+```
+
+**Cluster `-1`** se excluye por construcción (exporter.py ya lo filtra; no
+aparece en `assignments`/`assignments_lp` y no tiene capacidad agregable).
+
+**Query típica:** matriz semáforo cluster × escenario.
+```sql
+SELECT cluster_id, archetype_name, scenario,
+       ROUND(isc, 3) AS isc, estado_saturacion,
+       tareas_asignadas, ROUND(capacidad_estimada, 0) AS capacidad_estimada
+FROM `proyecto-sura-clustering-2026.sura_clustering_processed.kpi_saturacion_cluster`
+ORDER BY scenario, cluster_id
+```
+
+**Refresh:** `PYTHONPATH=. uv run python scripts/compute_isc.py` (segundos,
+puramente post-hoc — no recalcula ni el clustering ni el scoring).
+
+**Visual sugerido en Power BI:** gauge por cluster con color condicional
+sobre `estado_saturacion`, o matriz heatmap `cluster_id × scenario` con
+`isc` como valor. Complementa K2 (Gini global de carga) abriéndola por
+arquetipo, lo que permite ver si `lp_optimized` redistribuye mejor que
+`rule_based` a nivel cluster.
+
+### 2.8 Tablas de soporte: `clustering_input`, `feat_prestador`, `feat_empresa`
 
 Estos son los **insumos crudos** del modelo. El dashboard normalmente no
 los consume directamente — usa `prestador_clusters` + `assignments`. Pero
@@ -186,6 +230,7 @@ PYTHONPATH=. uv run python -m src.gold.clustering_model     # ~30 s
 PYTHONPATH=. uv run python -m src.assignment.exporter       # ~2 min
 PYTHONPATH=. uv run python -m src.assignment.optimizer      # ~25 s
 PYTHONPATH=. uv run python -m src.monitoring.kpis           # ~30 s
+PYTHONPATH=. uv run python scripts/compute_isc.py           # ~5 s — ISC post-hoc
 PYTHONPATH=. uv run python scripts/publish_to_bq.py         # ~20 s
 ```
 
