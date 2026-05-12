@@ -26,7 +26,9 @@ con `--replace` por sus pipelines), así que un refresh nunca rompe lecturas.
 | 9 | `recommendations_top10_enriched` | 2,792,168 | igual que 7 + top_contributor + 4 shares |
 | 10 | `assignments_lp` | 437,571 | top-1 por orden (lp_optimized) |
 | 11 | `kpis_summary` | 8 | 4 KPIs × 2 escenarios |
-| 12 | `kpi_saturacion_cluster` | 4–8 | 1 fila por (cluster × escenario) — ISC + semáforo |
+| 12 | `kpi_saturacion_cluster` | 4–8 | 1 fila por (cluster × escenario) — ISC + semáforo + prestadores_necesarios |
+| 13 | `kpi_scenario_diff` | 1 | métricas globales del trade-off rule_based ↔ lp_optimized |
+| 14 | `kpi_scenario_diff_by_cluster` | 4 | mismo trade-off pivoteado por cluster_id_rb |
 
 ---
 
@@ -245,6 +247,11 @@ isc                   FLOAT64  tareas_asignadas / capacidad_estimada
 estado_saturacion     STRING   "Normal (Verde)"  ISC ≤ 0.85
                                "Alerta (Amarillo)"  0.85 < ISC ≤ 1.0
                                "Crítico (Rojo)"  ISC > 1.0
+prestadores_necesarios INT64   # prestadores adicionales que llevarían el cluster
+                               a ISC = 1.0 manteniendo la mediana de capacidad
+                               actual. 0 para clusters Verde/Amarillo.
+                               Fórmula: ceil(tareas / median_capacidad) - n_providers
+                               cuando ISC > 1.0, else 0.
 computed_at           TIMESTAMP UTC en el momento del refresh — pill de freshness
 ```
 
@@ -269,7 +276,73 @@ sobre `estado_saturacion`, o matriz heatmap `cluster_id × scenario` con
 arquetipo, lo que permite ver si `lp_optimized` redistribuye mejor que
 `rule_based` a nivel cluster.
 
-### 2.9 Tablas de soporte: `clustering_input`, `feat_prestador`, `feat_empresa`
+### 2.9 `kpi_scenario_diff` (trade-off rule_based ↔ lp_optimized · global)
+
+Cuantifica QUÉ cambia LP frente a rule_based, sobre el universo de órdenes
+en ambas asignaciones (inner-join). Una sola fila. Independiente de
+`kpis_summary` — su granularidad es "una corrida de comparación", no
+"un KPI con baseline/model".
+
+```
+n_orders_compared              INT64    inner-join sobre (empresa, tarea, muni)
+n_orders_only_in_rule_based    INT64    órdenes RB que LP no logró fittear bajo cap (overflow)
+n_reassigned                   INT64    filas donde dni_prestador_rb != dni_prestador_lp
+pct_reassigned                 FLOAT64  n_reassigned / n_orders_compared
+gini_load_rule_based           FLOAT64  Gini de # órdenes por prestador (RB)
+gini_load_lp_optimized         FLOAT64  Gini de # órdenes por prestador (LP)
+gini_delta_abs                 FLOAT64  gini_lp - gini_rb (negativo = LP más equitativo)
+gini_delta_rel                 FLOAT64  delta relativo
+score_total_mean_rule_based    FLOAT64  promedio score_total RB
+score_total_mean_lp_optimized  FLOAT64  promedio score_total LP
+score_delta_mean               FLOAT64  mean(score_lp - score_rb) (negativo = LP cede calidad)
+score_delta_p25/p50/p75        FLOAT64  distribución del delta de score
+costo_log_mean_rule_based      FLOAT64  costo_logistico_prom promedio del prestador asignado RB
+costo_log_mean_lp_optimized    FLOAT64  idem LP
+costo_log_delta_abs            FLOAT64  lp - rb (negativo = LP más barato/orden)
+cost_savings_annual_cop        FLOAT64  costo_log_delta_abs * n_orders_compared
+                                        (SIGNO PRESERVADO — puede ser negativo)
+n_costo_log_null_rb            INT64    nulls en el lookup de costo (transparencia)
+n_costo_log_null_lp            INT64    idem
+computed_at                    TIMESTAMP UTC
+```
+
+**Visual sugerido en Power BI:** 4 cards en una fila (% reasignación,
+Δ Gini relativo, Δ score medio, Δ costo anual). Tooltip de cada card
+con la fórmula de la columna correspondiente.
+
+### 2.10 `kpi_scenario_diff_by_cluster` (trade-off pivoteado por cluster RB)
+
+Mismo análisis que 2.9 pero agregando por el cluster_id del prestador en
+rule_based. Permite ver dónde LP efectivamente redistribuye y dónde está
+bloqueado (e.g., el gate LIVIANA fuerza ~99% de cluster 3 a quedarse
+con el mismo prestador).
+
+```
+cluster_id                                    INT64
+archetype_name                                STRING
+n_orders                                      INT64
+n_reassigned_to_other_cluster                 INT64    cluster_id_lp != cluster_id_rb
+pct_reassigned_to_other_cluster               FLOAT64
+n_reassigned_to_same_cluster_diff_provider    INT64    mismo cluster, prestador distinto
+mean_score_delta                              FLOAT64
+mean_cost_delta                               FLOAT64
+computed_at                                   TIMESTAMP
+```
+
+**Query típica:** mostrar qué clusters se beneficiaron de LP.
+```sql
+SELECT cluster_id, archetype_name, n_orders,
+       ROUND(pct_reassigned_to_other_cluster, 4) AS pct_cross_cluster,
+       n_reassigned_to_same_cluster_diff_provider AS within_cluster_swaps,
+       ROUND(mean_score_delta, 4)  AS delta_score,
+       ROUND(mean_cost_delta, 0)   AS delta_cost_cop
+FROM `proyecto-sura-clustering-2026.sura_clustering_processed.kpi_scenario_diff_by_cluster`
+ORDER BY cluster_id
+```
+
+**Refresh ambas tablas:** `PYTHONPATH=. uv run python scripts/scenario_comparison.py`.
+
+### 2.11 Tablas de soporte: `clustering_input`, `feat_prestador`, `feat_empresa`
 
 Estos son los **insumos crudos** del modelo. El dashboard normalmente no
 los consume directamente — usa `prestador_clusters` + `assignments`. Pero
@@ -294,7 +367,8 @@ PYTHONPATH=. uv run python -m src.gold.clustering_model     # ~30 s
 PYTHONPATH=. uv run python -m src.assignment.exporter       # ~2 min
 PYTHONPATH=. uv run python -m src.assignment.optimizer      # ~25 s
 PYTHONPATH=. uv run python -m src.monitoring.kpis           # ~30 s
-PYTHONPATH=. uv run python scripts/compute_isc.py           # ~5 s — ISC post-hoc
+PYTHONPATH=. uv run python scripts/compute_isc.py           # ~5 s — ISC + prestadores_necesarios
+PYTHONPATH=. uv run python scripts/scenario_comparison.py   # ~20 s — trade-off RB ↔ LP
 PYTHONPATH=. uv run python scripts/publish_to_bq.py         # ~20 s
 ```
 

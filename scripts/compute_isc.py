@@ -211,10 +211,24 @@ def run() -> pl.DataFrame:
             pl.lit(now).alias("computed_at"),
         )
         .with_columns(_label_estado(pl.col("isc")).alias("estado_saturacion"))
+        .with_columns(
+            # Prescripción: para clusters Crítico (ISC > 1.0), # de prestadores
+            # adicionales necesarios para llevarlo a ISC = 1.0 manteniendo la
+            # mediana de capacidad actual. Clusters Verde/Amarillo → 0 (no se
+            # recomienda contratar contra varianza natural day-to-day).
+            pl.when(pl.col("isc") > THRESHOLDS["amarillo"])
+            .then(
+                ((pl.col("tareas_asignadas") / pl.col("median_capacidad")).ceil()
+                 - pl.col("n_providers")).cast(pl.Int64)
+            )
+            .otherwise(pl.lit(0, dtype=pl.Int64))
+            .alias("prestadores_necesarios")
+        )
         .select([
             "cluster_id", "archetype_name", "scenario",
             "n_providers", "median_capacidad", "capacidad_estimada",
             "tareas_asignadas", "isc", "estado_saturacion",
+            "prestadores_necesarios",
             "computed_at",
         ])
         .sort(["scenario", "cluster_id"])

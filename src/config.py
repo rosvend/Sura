@@ -48,6 +48,8 @@ KPIS_SUMMARY_PARQUET          = f"{GCS_BUCKET}/data/processed/kpis_summary.parqu
 KPI_SATURACION_CLUSTER_PARQUET = f"{GCS_BUCKET}/data/processed/kpi_saturacion_cluster.parquet"
 ASSIGNMENTS_ENRICHED_PARQUET  = f"{GCS_BUCKET}/data/processed/assignments_enriched.parquet"
 RECOMMENDATIONS_ENRICHED_PARQUET = f"{GCS_BUCKET}/data/processed/recommendations_top10_enriched.parquet"
+KPI_SCENARIO_DIFF_PARQUET            = f"{GCS_BUCKET}/data/processed/kpi_scenario_diff.parquet"
+KPI_SCENARIO_DIFF_BY_CLUSTER_PARQUET = f"{GCS_BUCKET}/data/processed/kpi_scenario_diff_by_cluster.parquet"
 
 # ── Tablas BigQuery que consume el dashboard (JS + Power BI) ─────────────────
 BQ_TABLE_ASSIGNMENTS            = f"{BQ_DATASET_GOLD}.assignments"
@@ -58,4 +60,6 @@ BQ_TABLE_KPIS_SUMMARY           = f"{BQ_DATASET_GOLD}.kpis_summary"
 BQ_TABLE_KPI_SATURACION_CLUSTER = f"{BQ_DATASET_GOLD}.kpi_saturacion_cluster"
 BQ_TABLE_ASSIGNMENTS_ENRICHED = f"{BQ_DATASET_GOLD}.assignments_enriched"
 BQ_TABLE_RECOMMENDATIONS_ENRICHED = f"{BQ_DATASET_GOLD}.recommendations_top10_enriched"
+BQ_TABLE_KPI_SCENARIO_DIFF             = f"{BQ_DATASET_GOLD}.kpi_scenario_diff"
+BQ_TABLE_KPI_SCENARIO_DIFF_BY_CLUSTER  = f"{BQ_DATASET_GOLD}.kpi_scenario_diff_by_cluster"
 
